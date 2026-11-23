@@ -1,0 +1,1532 @@
+{
+  "Comment": "Daily load of one source into Snowflake. Triggered by EventBridge with SOURCE_NAME, glueJobName, validationJobName and rootTask (DATABASE.SCHEMA.TASK). The run checks the request, runs the Glue extraction job, then runs the validation Glue job once for every successful S3 JOB_LOG row that extraction wrote. Only after those checks pass does it start the Snowflake root task and wait up to 30 minutes for the task chain to finish. Success is declared only after a final check finds no failed data item for the source. Any failure sends one email and ends the run with a result name that says which part failed. Environment values (Snowflake connection, endpoint, warehouse, emergency contact) are deployment placeholders filled in at deploy time. The whole run is capped at three hours. The validation Glue job must already have SNOWFLAKE_CONNECTION as a default argument. This state machine passes JOB_ID_PARAM and JOB_LOG_ID_PARAM.",
+  "StartAt": "InitializeConstants",
+  "TimeoutSeconds": 10800,
+  "States": {
+    "InitializeConstants": {
+      "Type": "Pass",
+      "Comment": "Sets the values every later step reads. Deployment placeholders (SnowflakeApiEndpoint, SnowflakeWarehouse, EmergencyRecipient, SnowflakeConnectionArn) are filled in when the workflow is deployed, so this file holds no account, endpoint, warehouse or contact details; only the email sender address is fixed here. The task chain is given 30 minutes (dagTimeoutSeconds) after the root task starts. The SQL and HTML pieces at the bottom are shared by several Snowflake queries so they are written once.",
+      "Assign": {
+        "sfApiEndpoint": "https://NESSPARTNERORG-INTRICITY.snowflakecomputing.com/api/v2/statements",
+        "sfHeaders": {
+          "Content-Type": "application/json",
+          "Accept": "application/json"
+        },
+        "sfWarehouse": "WORKSHOP_WH",
+        "sfStatementTimeout": 600,
+        "sesSender": "akash.ramaprasad@gmail.com",
+        "emergencyRecipient": "akash.ramaprasad@ness.com",
+        "objectLogTimeZone": "UTC",
+        "dagTimeoutSeconds": 1800,
+        "dagReported": "FAILED",
+        "statementPolls": 0,
+        "htmlNotApplicable": "<tr><td colspan='4' style='padding:8px; text-align:center;'>Not applicable for this failure type.</td></tr>",
+        "htmlObjectLookupFailed": "<tr><td colspan='4' style='padding:8px; text-align:center;'>Could not retrieve per-object failure detail from OBJECT_LOG (the lookup failed or returned no data) -- query OBJECT_LOG directly.</td></tr>",
+        "sqlBoundedObjects": ", FAILED_COUNT AS (SELECT COUNT(*) AS N FROM FAILED_OBJECTS), BOUNDED AS (SELECT OBJECT_ID, JOB_ID, COALESCE(TO_VARCHAR(JOB_ID), 'NULL') AS JOBID_TXT, COALESCE(TO_VARCHAR(OBJECT_ID), 'NULL') AS OBJECTID_TXT, REPLACE(REPLACE(REPLACE(COALESCE(NULLIF(UPPER(TRIM(TO_VARCHAR(LAYER))), ''), 'UNKNOWN'), '&', '&amp;'), '<', '&lt;'), '>', '&gt;') AS LAYER_TXT, REPLACE(REPLACE(REPLACE(LEFT(COALESCE(TO_VARCHAR(MESSAGE), '(no message)'), 500), '&', '&amp;'), '<', '&lt;'), '>', '&gt;') AS MESSAGE_TXT FROM FAILED_OBJECTS QUALIFY ROW_NUMBER() OVER (ORDER BY OBJECT_ID, JOB_ID) <= 50)",
+        "sqlObjectRowsHtml": "CASE WHEN (SELECT N FROM FAILED_COUNT) = 0 THEN '<tr><td colspan=\"4\" style=\"padding:8px;text-align:center;\">No FAILED rows found in OBJECT_LOG for this run.</td></tr>' ELSE (SELECT LISTAGG('<tr style=\"background-color:#ffe6e6;\"><td style=\"padding:8px;\">' || JOBID_TXT || '</td><td style=\"padding:8px;\">' || OBJECTID_TXT || '</td><td style=\"padding:8px;\">' || LAYER_TXT || '</td><td style=\"padding:8px;\">' || MESSAGE_TXT || '</td></tr>', '') WITHIN GROUP (ORDER BY OBJECT_ID, JOB_ID) FROM BOUNDED) || CASE WHEN (SELECT N FROM FAILED_COUNT) > 50 THEN '<tr><td colspan=\"4\" style=\"padding:8px;text-align:center;font-style:italic;\">' || TO_VARCHAR((SELECT N FROM FAILED_COUNT) - 50) || ' more failed object(s) not shown -- query OBJECT_LOG directly for the full list.</td></tr>' ELSE '' END END AS OBJECT_FAILURE_ROWS",
+        "sqlBoundedRecipients": ", BOUNDED AS (SELECT RECIPIENT FROM RECIPIENTS QUALIFY ROW_NUMBER() OVER (ORDER BY RECIPIENT) <= 50) SELECT LISTAGG(RECIPIENT, ',') WITHIN GROUP (ORDER BY RECIPIENT) AS RECIPIENTS FROM BOUNDED",
+        "sqlTaskLayerCase": "CASE WHEN UPPER(LAYER_KEY) LIKE '%GOLD%' THEN 'GOLD' WHEN UPPER(LAYER_KEY) LIKE '%SILVER%' THEN 'SILVER' WHEN UPPER(LAYER_KEY) LIKE '%BRONZE%' THEN 'BRONZE' ELSE NULL END",
+        "sqlBoundedFailedTasks": ", TASK_ROWS AS (SELECT RN, LAYER, REPLACE(REPLACE(REPLACE(COALESCE(TO_VARCHAR(TASK_NAME), '(unknown task)'), '&', '&amp;'), '<', '&lt;'), '>', '&gt;') AS TASK_TXT, REPLACE(REPLACE(REPLACE(COALESCE(TO_VARCHAR(STATE), '(unknown)'), '&', '&amp;'), '<', '&lt;'), '>', '&gt;') AS STATE_TXT, REPLACE(REPLACE(REPLACE(LEFT(COALESCE(TO_VARCHAR(ERROR_MESSAGE), '(no error message)'), 500), '&', '&amp;'), '<', '&lt;'), '>', '&gt;') AS ERROR_TXT FROM FAILED WHERE RN BETWEEN 2 AND 21)",
+        "sqlFailedTaskRowsHtml": "COALESCE((SELECT LISTAGG('<tr style=\"background-color:#ffe6e6;\"><td style=\"padding:8px;\">' || LAYER || '</td><td style=\"padding:8px;\">' || TASK_TXT || '</td><td style=\"padding:8px;\">' || STATE_TXT || '</td><td style=\"padding:8px;\">' || ERROR_TXT || '</td></tr>', '') WITHIN GROUP (ORDER BY RN) FROM TASK_ROWS), '') || CASE WHEN (SELECT COUNT(*) FROM FAILED) > 21 THEN '<tr><td colspan=\"4\" style=\"padding:8px;text-align:center;font-style:italic;\">' || TO_VARCHAR((SELECT COUNT(*) FROM FAILED) - 21) || ' more failed task(s) not shown -- query EDH_TASK_DAG_LOG directly for the full list.</td></tr>' ELSE '' END AS FAILED_TASK_ROWS"
+      },
+      "Next": "ValidateExecutionInput"
+    },
+    "ValidateExecutionInput": {
+      "Type": "Choice",
+      "Comment": "Checks the request before any work starts. It must contain SOURCE_NAME, glueJobName, validationJobName and rootTask as non-empty text. rootTask must be DATABASE.SCHEMA.TASK: exactly three non-empty parts with no spaces, semicolons or quote marks. SOURCE_NAME must not contain a single quote or a backslash. These rules stop a bad value from breaking, or being smuggled into, a Snowflake query. The backslash rule is checked in the next step.",
+      "Choices": [
+        {
+          "Or": [
+            {
+              "Variable": "$.SOURCE_NAME",
+              "IsPresent": false
+            },
+            {
+              "Variable": "$.glueJobName",
+              "IsPresent": false
+            },
+            {
+              "Variable": "$.rootTask",
+              "IsPresent": false
+            },
+            {
+              "Variable": "$.validationJobName",
+              "IsPresent": false
+            }
+          ],
+          "Next": "PrepareInvalidInputNotification"
+        },
+        {
+          "Or": [
+            {
+              "Not": {
+                "Variable": "$.SOURCE_NAME",
+                "IsString": true
+              }
+            },
+            {
+              "Not": {
+                "Variable": "$.glueJobName",
+                "IsString": true
+              }
+            },
+            {
+              "Not": {
+                "Variable": "$.rootTask",
+                "IsString": true
+              }
+            },
+            {
+              "Not": {
+                "Variable": "$.validationJobName",
+                "IsString": true
+              }
+            }
+          ],
+          "Next": "PrepareInvalidInputNotification"
+        },
+        {
+          "Or": [
+            {
+              "Variable": "$.SOURCE_NAME",
+              "StringEquals": ""
+            },
+            {
+              "Variable": "$.glueJobName",
+              "StringEquals": ""
+            },
+            {
+              "Variable": "$.rootTask",
+              "StringEquals": ""
+            },
+            {
+              "Variable": "$.SOURCE_NAME",
+              "StringMatches": "*'*"
+            },
+            {
+              "Variable": "$.rootTask",
+              "StringMatches": "*'*"
+            },
+            {
+              "Variable": "$.rootTask",
+              "StringMatches": "*\"*"
+            },
+            {
+              "Variable": "$.rootTask",
+              "StringMatches": "*;*"
+            },
+            {
+              "Variable": "$.rootTask",
+              "StringMatches": "* *"
+            },
+            {
+              "Not": {
+                "Variable": "$.rootTask",
+                "StringMatches": "*.*.*"
+              }
+            },
+            {
+              "Variable": "$.rootTask",
+              "StringMatches": "*.*.*.*"
+            },
+            {
+              "Variable": "$.rootTask",
+              "StringMatches": ".*"
+            },
+            {
+              "Variable": "$.rootTask",
+              "StringMatches": "*."
+            },
+            {
+              "Variable": "$.rootTask",
+              "StringMatches": "*..*"
+            },
+            {
+              "Variable": "$.validationJobName",
+              "StringEquals": ""
+            }
+          ],
+          "Next": "PrepareInvalidInputNotification"
+        }
+      ],
+      "Default": "CheckInputForBackslash"
+    },
+    "CheckInputForBackslash": {
+      "Type": "Choice",
+      "QueryLanguage": "JSONata",
+      "Comment": "Rejects a backslash in SOURCE_NAME or rootTask. Snowflake treats a backslash inside quotes as an escape character, so one could break out of the quoted value in a query. This is checked here, directly for the character, because a StringMatches pattern cannot reliably find a backslash in the middle or at the end of a value.",
+      "Choices": [
+        {
+          "Condition": "{% $contains($states.input.SOURCE_NAME, '\\\\') or $contains($states.input.rootTask, '\\\\') %}",
+          "Next": "PrepareInvalidInputNotification"
+        }
+      ],
+      "Default": "CaptureRootTaskParts"
+    },
+    "PrepareInvalidInputNotification": {
+      "Type": "Pass",
+      "Comment": "Builds the failure email for a request that did not pass the check. Neither Glue nor Snowflake is started. The request names no trustworthy database to look up recipients in, so this email goes straight to the emergency contact, from the standard sender. It shows the request exactly as received so it can be corrected.",
+      "Parameters": {
+        "component": "INPUT_VALIDATION",
+        "taskName": "N/A (rejected before Glue/Snowflake was invoked)",
+        "rootTaskName": "N/A",
+        "status": "REJECTED",
+        "runId": "N/A",
+        "startedAt.$": "$$.Execution.StartTime",
+        "completedAt.$": "$$.State.EnteredTime",
+        "errorMessage.$": "States.Format('Invalid execution input. Required: SOURCE_NAME, glueJobName, validationJobName and rootTask as non-empty strings. SOURCE_NAME and rootTask must not contain a single quote or a backslash, and rootTask must be DB.SCHEMA.TASK (exactly three non-empty dot-separated parts, no spaces, semicolons or double quotes). Neither Glue nor Snowflake was invoked. Input received: {}', States.JsonToString($$.Execution.Input))",
+        "sourceName": "N/A (invalid execution input)",
+        "objectFailureRows.$": "$htmlNotApplicable",
+        "failedLayer": "N/A",
+        "failedLayers": "N/A",
+        "failedTaskRows": ""
+      },
+      "ResultPath": "$.FailureDetail",
+      "Next": "PrepareEmergencyRecipients"
+    },
+    "CaptureRootTaskParts": {
+      "Type": "Pass",
+      "Comment": "Splits rootTask into its database, schema and task name. The metadata tables (JOB_CONFIG, JOB_LOG, OBJECT_LOG, EDH_TASK_DAG_LOG) live in the same DATABASE.SCHEMA as the root task, so that pair is saved as metadataSchema for every later query.",
+      "Assign": {
+        "taskDatabase.$": "States.ArrayGetItem(States.StringSplit($.rootTask, '.'), 0)",
+        "taskSchema.$": "States.ArrayGetItem(States.StringSplit($.rootTask, '.'), 1)",
+        "taskName.$": "States.ArrayGetItem(States.StringSplit($.rootTask, '.'), 2)",
+        "metadataSchema.$": "States.Format('{}.{}', States.ArrayGetItem(States.StringSplit($.rootTask, '.'), 0), States.ArrayGetItem(States.StringSplit($.rootTask, '.'), 1))"
+      },
+      "Next": "TriggerGlueJob"
+    },
+    "TriggerGlueJob": {
+      "Type": "Task",
+      "Comment": "Starts the Glue extraction job named in the request, passes it the source name, and waits for it to finish. Validation is not part of this step. If the job is still running after two hours this step gives up and the failure email is sent. The job is never started a second time, because a second start would load the same data again.",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName.$": "$.glueJobName",
+        "Arguments": {
+          "--SOURCE_NAME.$": "$.SOURCE_NAME"
+        }
+      },
+      "TimeoutSeconds": 7200,
+      "ResultPath": null,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.GlueJobError",
+          "Next": "ValidateGlueErrorCause"
+        }
+      ],
+      "Next": "LookupIngestionRunsForValidation"
+    },
+    "LookupIngestionRunsForValidation": {
+      "Type": "Task",
+      "Comment": "Runs only after Glue extraction succeeded. Reads the SUCCESS JOB_LOG rows this run wrote for the source (layer S3, started at or after this workflow started). Each row is one ingestion job. The validation script checks one JOB_ID and one JOB_LOG_ID, so the next step starts it once per row. JOB_ID stays text, so 0001 is not returned as 1.",
+      "Resource": "arn:aws:states:::http:invoke",
+      "Parameters": {
+        "ApiEndpoint.$": "$sfApiEndpoint",
+        "Method": "POST",
+        "Authentication": {
+          "ConnectionArn": "arn:aws:events:us-east-1:334296257544:connection/Snowflake-SQLAPI-Connection/01f03f2f-aced-419f-90f7-ff11cfc437cf"
+        },
+        "Headers.$": "$sfHeaders",
+        "RequestBody": {
+          "statement.$": "States.Format('SELECT TO_VARCHAR(JOB_ID), TO_VARCHAR(JOB_LOG_ID) FROM {}.JOB_LOG WHERE UPPER(TRIM(SOURCE_NAME)) = UPPER(TRIM(\\'{}\\')) AND UPPER(TRIM(STATUS)) = \\'SUCCESS\\' AND UPPER(TRIM(COALESCE(LAYER, \\'\\'))) = \\'S3\\' AND START_TIME >= CONVERT_TIMEZONE(\\'UTC\\', \\'{}\\', TO_TIMESTAMP_NTZ(\\'{}\\')) ORDER BY JOB_LOG_ID', $metadataSchema, $.SOURCE_NAME, $objectLogTimeZone, $$.Execution.StartTime)",
+          "warehouse.$": "$sfWarehouse",
+          "timeout.$": "$sfStatementTimeout"
+        }
+      },
+      "ResultPath": "$.IngestionRuns",
+      "TimeoutSeconds": 90,
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.Http.StatusCode.429",
+            "States.Http.StatusCode.500",
+            "States.Http.StatusCode.502",
+            "States.Http.StatusCode.503",
+            "States.Http.StatusCode.504",
+            "Events.ConnectionResource.InternalError",
+            "States.Timeout"
+          ],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 2,
+          "BackoffRate": 2,
+          "MaxDelaySeconds": 30,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.ValidationLookupError",
+          "Next": "PrepareValidationLookupFailedNotification"
+        }
+      ],
+      "Next": "EvaluateIngestionRunsForValidation"
+    },
+    "EvaluateIngestionRunsForValidation": {
+      "Type": "Choice",
+      "Comment": "A missing or empty answer means there is no successful extract to validate, so the root task is not started. One or more rows go on to the validation jobs.",
+      "Choices": [
+        {
+          "Variable": "$.IngestionRuns.ResponseBody.data[0][0]",
+          "IsPresent": false,
+          "Next": "PrepareValidationLookupFailedNotification"
+        }
+      ],
+      "Default": "RunValidationJobs"
+    },
+    "RunValidationJobs": {
+      "Type": "Map",
+      "Comment": "Starts the validation Glue job once for each successful extract. The job name comes from validationJobName. JOB_ID_PARAM and JOB_LOG_ID_PARAM come from the lookup. SNOWFLAKE_CONNECTION is a default argument on that Glue job, so it is not passed here. Up to three validations run at once. When every job succeeds, the Snowflake root task starts. One failure stops the map and the root task is not started.",
+      "ItemsPath": "$.IngestionRuns.ResponseBody.data",
+      "MaxConcurrency": 3,
+      "ResultPath": null,
+      "ItemSelector": {
+        "validationJobName.$": "$.validationJobName",
+        "jobId.$": "$$.Map.Item.Value[0]",
+        "jobLogId.$": "$$.Map.Item.Value[1]"
+      },
+      "ItemProcessor": {
+        "ProcessorConfig": {
+          "Mode": "INLINE"
+        },
+        "StartAt": "TriggerValidationJob",
+        "States": {
+          "TriggerValidationJob": {
+            "Type": "Task",
+            "Comment": "Runs Everyday_Validation_New for this one successful JOB_LOG row and waits for it to finish. A second start is not attempted.",
+            "Resource": "arn:aws:states:::glue:startJobRun.sync",
+            "Parameters": {
+              "JobName.$": "$.validationJobName",
+              "Arguments": {
+                "--JOB_ID_PARAM.$": "$.jobId",
+                "--JOB_LOG_ID_PARAM.$": "$.jobLogId"
+              }
+            },
+            "TimeoutSeconds": 3600,
+            "End": true
+          }
+        }
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.ValidationError",
+          "Next": "PrepareValidationFailureNotification"
+        }
+      ],
+      "Next": "InvokeSnowflakeRootTask"
+    },
+    "PrepareValidationLookupFailedNotification": {
+      "Type": "Pass",
+      "Comment": "Builds the email sent when extraction succeeded but the successful JOB_LOG rows could not be read, or none were found. The validation job and the Snowflake root task are not started.",
+      "Parameters": {
+        "component": "VALIDATION",
+        "taskName.$": "$.validationJobName",
+        "rootTaskName.$": "$.rootTask",
+        "status": "FAILED",
+        "runId": "N/A",
+        "startedAt.$": "$$.Execution.StartTime",
+        "completedAt.$": "$$.State.EnteredTime",
+        "errorMessage": "Glue extraction succeeded, but no SUCCESS JOB_LOG row with LAYER S3 was found for this source since the workflow started, or the lookup failed. Validation was not started, and the Snowflake root task was not started.",
+        "sourceName.$": "$.SOURCE_NAME",
+        "objectFailureRows.$": "$htmlNotApplicable",
+        "failedLayer": "VALIDATION",
+        "failedLayers": "VALIDATION",
+        "failedTaskRows": ""
+      },
+      "ResultPath": "$.FailureDetail",
+      "Next": "ResolveSesFromAddress"
+    },
+    "PrepareValidationFailureNotification": {
+      "Type": "Pass",
+      "Comment": "Builds the email sent when a validation Glue job failed or ran longer than one hour. The Snowflake root task was not started.",
+      "Parameters": {
+        "component": "VALIDATION",
+        "taskName.$": "$.validationJobName",
+        "rootTaskName.$": "$.rootTask",
+        "status": "FAILED",
+        "runId": "N/A",
+        "startedAt.$": "$$.Execution.StartTime",
+        "completedAt.$": "$$.State.EnteredTime",
+        "errorMessage.$": "States.Format('Validation Glue job failed after extraction. The Snowflake root task was not started. {}', States.JsonToString($.ValidationError))",
+        "sourceName.$": "$.SOURCE_NAME",
+        "objectFailureRows.$": "$htmlNotApplicable",
+        "failedLayer": "VALIDATION",
+        "failedLayers": "VALIDATION",
+        "failedTaskRows": ""
+      },
+      "ResultPath": "$.FailureDetail",
+      "Next": "ResolveSesFromAddress"
+    },
+    "InvokeSnowflakeRootTask": {
+      "Type": "Task",
+      "Comment": "Runs only after every validation job succeeded. Asks Snowflake to execute the root task, which starts the bronze, silver and gold work. It is deliberately not retried: a second call would start a second load.",
+      "Resource": "arn:aws:states:::http:invoke",
+      "Parameters": {
+        "ApiEndpoint.$": "$sfApiEndpoint",
+        "Method": "POST",
+        "Authentication": {
+          "ConnectionArn": "arn:aws:events:us-east-1:334296257544:connection/Snowflake-SQLAPI-Connection/01f03f2f-aced-419f-90f7-ff11cfc437cf"
+        },
+        "Headers.$": "$sfHeaders",
+        "RequestBody": {
+          "statement.$": "States.Format('EXECUTE TASK {};', $.rootTask)",
+          "timeout.$": "$sfStatementTimeout"
+        }
+      },
+      "ResultPath": null,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.OrchestrationError",
+          "Next": "PrepareOrchestrationFailureNotification"
+        }
+      ],
+      "Next": "SetDagDeadline"
+    },
+    "SetDagDeadline": {
+      "Type": "Pass",
+      "QueryLanguage": "JSONata",
+      "Comment": "Records the latest time the task chain may still be running: now (just after the root task was started) plus dagTimeoutSeconds. Every status check compares against this time, so a stuck chain is reported after 30 minutes instead of being waited on indefinitely.",
+      "Assign": {
+        "dagDeadline": "{% $fromMillis($toMillis($states.context.State.EnteredTime) + $dagTimeoutSeconds * 1000) %}"
+      },
+      "Next": "WaitForDagCompletion"
+    },
+    "WaitForDagCompletion": {
+      "Type": "Wait",
+      "Comment": "Pauses 10 seconds between status checks of the Snowflake task chain.",
+      "Seconds": 10,
+      "Next": "CheckDagLog"
+    },
+    "CheckDagLog": {
+      "Type": "Task",
+      "Comment": "Asks Snowflake whether the task chain started by this run is running, succeeded or failed. It looks first in EDH_TASK_DAG_LOG; if that has no row for this run it uses Snowflake task history for this exact database, schema and task; and after that the newest JOB_LOG row for this source that is not the Glue (S3) extract. A finished Glue extract alone never counts as the chain finishing.",
+      "Assign": {
+        "statementPolls": 0
+      },
+      "Resource": "arn:aws:states:::http:invoke",
+      "Parameters": {
+        "ApiEndpoint.$": "$sfApiEndpoint",
+        "Method": "POST",
+        "Authentication": {
+          "ConnectionArn": "arn:aws:events:us-east-1:334296257544:connection/Snowflake-SQLAPI-Connection/01f03f2f-aced-419f-90f7-ff11cfc437cf"
+        },
+        "Headers.$": "$sfHeaders",
+        "RequestBody": {
+          "statement.$": "States.Format('WITH BOUND AS (SELECT CONVERT_TIMEZONE(\\'UTC\\', COALESCE(TRY_TO_TIMESTAMP_TZ(REPLACE(\\'{}\\', \\'Z\\', \\'+00:00\\')), TRY_TO_TIMESTAMP_LTZ(\\'{}\\'))) AS START_NTZ), H AS (SELECT NAME, DATABASE_NAME, SCHEMA_NAME, STATE, SCHEDULED_TIME, GRAPH_RUN_GROUP_ID FROM TABLE({}.INFORMATION_SCHEMA.TASK_HISTORY(SCHEDULED_TIME_RANGE_START => \\'{}\\'::TIMESTAMP_LTZ, RESULT_LIMIT => 1000))), DAG_ROWS AS (SELECT UPPER(TRIM(STATE)) AS STATE FROM {}.EDH_TASK_DAG_LOG WHERE (UPPER(ROOT_TASK_NAME) IN (UPPER(\\'{}\\'), UPPER(\\'{}\\')) OR UPPER(TASK_NAME) IN (UPPER(\\'{}\\'), UPPER(\\'{}\\'))) AND LOG_TIMESTAMP >= (SELECT START_NTZ FROM BOUND)), ROOT_RUN AS (SELECT STATE, GRAPH_RUN_GROUP_ID FROM H WHERE UPPER(NAME) = UPPER(\\'{}\\') AND UPPER(DATABASE_NAME) = UPPER(\\'{}\\') AND UPPER(SCHEMA_NAME) = UPPER(\\'{}\\') AND STATE <> \\'SCHEDULED\\' AND SCHEDULED_TIME <= CURRENT_TIMESTAMP() ORDER BY SCHEDULED_TIME DESC LIMIT 1), JOB AS (SELECT UPPER(TRIM(STATUS)) AS STATUS FROM {}.JOB_LOG WHERE UPPER(TRIM(SOURCE_NAME)) = UPPER(TRIM(\\'{}\\')) AND COALESCE(UPPER(TRIM(LAYER)), \\'\\') <> \\'S3\\' AND START_TIME >= (SELECT START_NTZ FROM BOUND) ORDER BY START_TIME DESC LIMIT 1) SELECT CASE WHEN EXISTS (SELECT 1 FROM DAG_ROWS WHERE STATE IN (\\'RUNNING\\', \\'EXECUTING\\', \\'SCHEDULED\\', \\'STARTED\\', \\'IN_PROGRESS\\', \\'PENDING\\', \\'QUEUED\\')) THEN \\'EXECUTING\\' WHEN EXISTS (SELECT 1 FROM DAG_ROWS WHERE STATE IN (\\'FAILED\\', \\'FAILURE\\', \\'ERROR\\', \\'CANCELLED\\', \\'CANCELED\\', \\'SKIPPED\\', \\'FAILED_AND_AUTO_SUSPENDED\\')) THEN \\'FAILED\\' WHEN EXISTS (SELECT 1 FROM DAG_ROWS WHERE STATE IN (\\'SUCCEEDED\\', \\'SUCCESS\\', \\'SUCCESSFUL\\', \\'COMPLETED\\', \\'COMPLETE\\', \\'DONE\\')) THEN \\'SUCCEEDED\\' WHEN (SELECT COUNT(*) FROM DAG_ROWS) > 0 THEN (SELECT STATE FROM DAG_ROWS LIMIT 1) WHEN (SELECT GRAPH_RUN_GROUP_ID FROM ROOT_RUN) IS NOT NULL AND EXISTS (SELECT 1 FROM H WHERE GRAPH_RUN_GROUP_ID = (SELECT GRAPH_RUN_GROUP_ID FROM ROOT_RUN) AND STATE = \\'EXECUTING\\') THEN \\'EXECUTING\\' WHEN (SELECT GRAPH_RUN_GROUP_ID FROM ROOT_RUN) IS NOT NULL AND EXISTS (SELECT 1 FROM H WHERE GRAPH_RUN_GROUP_ID = (SELECT GRAPH_RUN_GROUP_ID FROM ROOT_RUN) AND STATE IN (\\'FAILED\\', \\'CANCELLED\\')) THEN \\'FAILED\\' WHEN (SELECT STATE FROM ROOT_RUN) IS NOT NULL THEN UPPER(TRIM((SELECT STATE FROM ROOT_RUN))) WHEN (SELECT STATUS FROM JOB) IN (\\'SUCCESS\\', \\'SUCCEEDED\\', \\'COMPLETED\\', \\'COMPLETE\\') THEN \\'SUCCEEDED\\' WHEN (SELECT STATUS FROM JOB) IN (\\'FAILED\\', \\'FAILURE\\', \\'ERROR\\', \\'CANCELLED\\') THEN \\'FAILED\\' ELSE NULL END AS STATE', $$.Execution.StartTime, $$.Execution.StartTime, $taskDatabase, $$.Execution.StartTime, $metadataSchema, $taskName, $.rootTask, $taskName, $.rootTask, $taskName, $taskDatabase, $taskSchema, $metadataSchema, $.SOURCE_NAME)",
+          "warehouse.$": "$sfWarehouse",
+          "timeout": 60
+        }
+      },
+      "ResultPath": "$.DagStatus",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.Http.StatusCode.429",
+            "States.Http.StatusCode.500",
+            "States.Http.StatusCode.502",
+            "States.Http.StatusCode.503",
+            "States.Http.StatusCode.504",
+            "Events.ConnectionResource.InternalError",
+            "States.Timeout"
+          ],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 3,
+          "BackoffRate": 2,
+          "MaxDelaySeconds": 30,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.OrchestrationError",
+          "Next": "PrepareOrchestrationFailureNotification"
+        }
+      ],
+      "Next": "EvaluateDagStatus",
+      "TimeoutSeconds": 90
+    },
+    "EvaluateDagStatus": {
+      "Type": "Choice",
+      "Comment": "Decides what to do with the answer Snowflake just gave. If the answer is not ready yet, it is fetched again after a short pause (up to 10 times, then a fresh check starts). A success goes to the final data check; a failure goes to find which task failed. If the 30-minute deadline has passed without a success or failure, the timeout email is prepared. Anything else means the chain is still running, so it checks again in 10 seconds.",
+      "Choices": [
+        {
+          "And": [
+            {
+              "Variable": "$.DagStatus.StatusCode",
+              "NumericEquals": 202
+            },
+            {
+              "Variable": "$.DagStatus.ResponseBody.statementHandle",
+              "IsPresent": true
+            },
+            {
+              "Variable": "$statementPolls",
+              "NumericGreaterThanEquals": 10
+            },
+            {
+              "Variable": "$$.State.EnteredTime",
+              "TimestampGreaterThanEqualsPath": "$dagDeadline"
+            }
+          ],
+          "Next": "PreparePollingTimeoutNotification"
+        },
+        {
+          "And": [
+            {
+              "Variable": "$.DagStatus.StatusCode",
+              "NumericEquals": 202
+            },
+            {
+              "Variable": "$.DagStatus.ResponseBody.statementHandle",
+              "IsPresent": true
+            },
+            {
+              "Variable": "$statementPolls",
+              "NumericGreaterThanEquals": 10
+            }
+          ],
+          "Next": "WaitForDagCompletion"
+        },
+        {
+          "And": [
+            {
+              "Variable": "$.DagStatus.StatusCode",
+              "NumericEquals": 202
+            },
+            {
+              "Variable": "$.DagStatus.ResponseBody.statementHandle",
+              "IsPresent": true
+            }
+          ],
+          "Next": "WaitForDagStatement"
+        },
+        {
+          "And": [
+            {
+              "Variable": "$.DagStatus.ResponseBody.data[0][0]",
+              "IsPresent": false
+            },
+            {
+              "Variable": "$$.State.EnteredTime",
+              "TimestampGreaterThanEqualsPath": "$dagDeadline"
+            }
+          ],
+          "Next": "PreparePollingTimeoutNotification"
+        },
+        {
+          "Variable": "$.DagStatus.ResponseBody.data[0][0]",
+          "IsPresent": false,
+          "Next": "WaitForDagCompletion"
+        },
+        {
+          "Or": [
+            {
+              "Variable": "$.DagStatus.ResponseBody.data[0][0]",
+              "StringEquals": "COMPLETED"
+            },
+            {
+              "Variable": "$.DagStatus.ResponseBody.data[0][0]",
+              "StringEquals": "SUCCESS"
+            },
+            {
+              "Variable": "$.DagStatus.ResponseBody.data[0][0]",
+              "StringEquals": "SUCCEEDED"
+            }
+          ],
+          "Next": "WaitBeforeVerifyingCompletion"
+        },
+        {
+          "Or": [
+            {
+              "Variable": "$.DagStatus.ResponseBody.data[0][0]",
+              "StringEquals": "FAILED"
+            },
+            {
+              "Variable": "$.DagStatus.ResponseBody.data[0][0]",
+              "StringEquals": "FAILURE"
+            },
+            {
+              "Variable": "$.DagStatus.ResponseBody.data[0][0]",
+              "StringEquals": "ERROR"
+            },
+            {
+              "Variable": "$.DagStatus.ResponseBody.data[0][0]",
+              "StringEquals": "CANCELLED"
+            },
+            {
+              "Variable": "$.DagStatus.ResponseBody.data[0][0]",
+              "StringEquals": "FAILED_AND_AUTO_SUSPENDED"
+            },
+            {
+              "Variable": "$.DagStatus.ResponseBody.data[0][0]",
+              "StringEquals": "SKIPPED"
+            }
+          ],
+          "Next": "GetFailedChildTaskDetail"
+        },
+        {
+          "Variable": "$$.State.EnteredTime",
+          "TimestampGreaterThanEqualsPath": "$dagDeadline",
+          "Next": "PreparePollingTimeoutNotification"
+        }
+      ],
+      "Default": "WaitForDagCompletion"
+    },
+    "WaitForDagStatement": {
+      "Type": "Wait",
+      "Comment": "Snowflake accepted the status query but has not finished answering. Waits 3 seconds, then fetches the answer.",
+      "Seconds": 3,
+      "Next": "GetDagStatementResult"
+    },
+    "GetDagStatementResult": {
+      "Type": "Task",
+      "Comment": "Fetches the Snowflake answer that was not ready on the previous try and returns it to the same decision step.",
+      "Assign": {
+        "statementPolls.$": "States.MathAdd($statementPolls, 1)"
+      },
+      "Resource": "arn:aws:states:::http:invoke",
+      "Parameters": {
+        "ApiEndpoint.$": "States.Format('{}/{}', $sfApiEndpoint, $.DagStatus.ResponseBody.statementHandle)",
+        "Method": "GET",
+        "Authentication": {
+          "ConnectionArn": "arn:aws:events:us-east-1:334296257544:connection/Snowflake-SQLAPI-Connection/01f03f2f-aced-419f-90f7-ff11cfc437cf"
+        },
+        "Headers.$": "$sfHeaders"
+      },
+      "ResultPath": "$.DagStatus",
+      "TimeoutSeconds": 60,
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.Http.StatusCode.429",
+            "States.Http.StatusCode.500",
+            "States.Http.StatusCode.502",
+            "States.Http.StatusCode.503",
+            "States.Http.StatusCode.504",
+            "Events.ConnectionResource.InternalError",
+            "States.Timeout"
+          ],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 3,
+          "BackoffRate": 2,
+          "MaxDelaySeconds": 30,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.OrchestrationError",
+          "Next": "PrepareOrchestrationFailureNotification"
+        }
+      ],
+      "Next": "EvaluateDagStatus"
+    },
+    "PreparePollingTimeoutNotification": {
+      "Type": "Pass",
+      "Comment": "Builds the email sent when the task chain has neither succeeded nor failed within 30 minutes of being started. The Snowflake tasks may still be running, so the email asks for the task history to be checked.",
+      "Parameters": {
+        "component": "POLLING_TIMEOUT",
+        "taskName.$": "$.rootTask",
+        "rootTaskName.$": "$.rootTask",
+        "status.$": "States.Format('UNKNOWN (no success or failure reported within {} seconds of starting the root task)', $dagTimeoutSeconds)",
+        "runId": "N/A",
+        "startedAt.$": "$$.Execution.StartTime",
+        "completedAt.$": "$$.State.EnteredTime",
+        "errorMessage": "The Snowflake task chain did not report success or failure before the deadline. It may still be running -- check Snowflake task history directly.",
+        "sourceName.$": "$.SOURCE_NAME",
+        "objectFailureRows.$": "$htmlNotApplicable",
+        "failedLayer": "N/A",
+        "failedLayers": "N/A",
+        "failedTaskRows": ""
+      },
+      "ResultPath": "$.FailureDetail",
+      "Next": "ResolveSesFromAddress"
+    },
+    "PrepareOrchestrationFailureNotification": {
+      "Type": "Pass",
+      "Comment": "Builds the email sent when this workflow could not start the root task or could not read the chain's status from Snowflake. The problem is reaching Snowflake, not a failure inside the bronze, silver or gold work.",
+      "Parameters": {
+        "component": "SNOWFLAKE_ORCHESTRATION",
+        "taskName.$": "$.rootTask",
+        "rootTaskName.$": "$.rootTask",
+        "status": "UNKNOWN",
+        "runId": "N/A",
+        "startedAt.$": "$$.Execution.StartTime",
+        "completedAt.$": "$$.State.EnteredTime",
+        "errorMessage.$": "States.Format('The Snowflake root-task trigger or DAG-status query failed: {}', States.JsonToString($.OrchestrationError))",
+        "sourceName.$": "$.SOURCE_NAME",
+        "objectFailureRows.$": "$htmlNotApplicable",
+        "failedLayer": "N/A",
+        "failedLayers": "N/A",
+        "failedTaskRows": ""
+      },
+      "ResultPath": "$.FailureDetail",
+      "Next": "ResolveSesFromAddress"
+    },
+    "WaitBeforeVerifyingCompletion": {
+      "Type": "Wait",
+      "Comment": "The chain reported success. Waits 30 seconds so the last log rows are written, then double-checks that no task and no data item failed during this run.",
+      "Assign": {
+        "dagReported": "COMPLETED"
+      },
+      "Seconds": 30,
+      "Next": "GetFailedChildTaskDetail"
+    },
+    "GetFailedChildTaskDetail": {
+      "Type": "Task",
+      "Comment": "Looks in EDH_TASK_DAG_LOG for every task of this chain that failed during this run. Columns 0-7 describe the first failed task (a later task such as bronze, silver or gold is chosen ahead of the root task): name, root, status, error, run id, times, ROOT/CHILD. Column 8 is its layer, taken from the first of: OBJECT_LOG.LAYER of this run's failed items of the job with the same name, JOB_LOG.LAYER of that job in this run, JOB_LOG.LAYER of rows whose LOG_ENTITY names the task, JOB_CONFIG.LAYER of that job, the task name (GOLD, SILVER, BRONZE), and - for a task that is not a job, such as a DBT validation - the layer of this source's earliest failed item (or failed job) in this run, then the layer the run had reached (the latest task of this run that succeeded, e.g. TASK_SILVER_TO_GOLD_LOAD -> GOLD); otherwise UNKNOWN. Log rows belong to the source when their own SOURCE_NAME matches or their JOB_ID is a JOB_CONFIG job of it. Column 9 lists every failed layer in run order. Column 10 is an HTML-safe row for each OTHER failed task (empty when only one task failed), so the email never repeats the first task's error.",
+      "Resource": "arn:aws:states:::http:invoke",
+      "Parameters": {
+        "ApiEndpoint.$": "$sfApiEndpoint",
+        "Method": "POST",
+        "Authentication": {
+          "ConnectionArn": "arn:aws:events:us-east-1:334296257544:connection/Snowflake-SQLAPI-Connection/01f03f2f-aced-419f-90f7-ff11cfc437cf"
+        },
+        "Headers.$": "$sfHeaders",
+        "RequestBody": {
+          "statement.$": "States.Format('WITH SRC_JOBS AS (SELECT JOB_ID, REGEXP_REPLACE(REGEXP_REPLACE(UPPER(TRIM(JOB_NAME)), \\'^.*[.]\\', \\'\\'), \\'^TASK_\\', \\'\\') AS JOB_KEY, NULLIF(UPPER(TRIM(LAYER)), \\'\\') AS CFG_LAYER FROM {}.JOB_CONFIG WHERE UPPER(TRIM(SOURCE_NAME)) = UPPER(TRIM(\\'{}\\'))), SRC_JOB_IDS AS (SELECT DISTINCT JOB_ID FROM SRC_JOBS), RUN_OBJ AS (SELECT OL.JOB_ID, UPPER(TRIM(OL.LAYER)) AS LAYER, OL.START_TIME FROM {}.OBJECT_LOG OL LEFT JOIN SRC_JOB_IDS SJ ON SJ.JOB_ID = OL.JOB_ID WHERE (UPPER(TRIM(OL.SOURCE_NAME)) = UPPER(TRIM(\\'{}\\')) OR SJ.JOB_ID IS NOT NULL) AND UPPER(TRIM(OL.STATUS)) IN (\\'FAILED\\', \\'FAILURE\\', \\'ERROR\\') AND NULLIF(TRIM(OL.LAYER), \\'\\') IS NOT NULL AND OL.START_TIME >= CONVERT_TIMEZONE(\\'UTC\\', \\'{}\\', TO_TIMESTAMP_NTZ(\\'{}\\'))), RUN_JOBLOG AS (SELECT JL.JOB_ID, JL.LOG_ENTITY, UPPER(TRIM(JL.LAYER)) AS LAYER, UPPER(TRIM(JL.STATUS)) AS STATUS, JL.START_TIME FROM {}.JOB_LOG JL LEFT JOIN SRC_JOB_IDS SJ ON SJ.JOB_ID = JL.JOB_ID WHERE (UPPER(TRIM(JL.SOURCE_NAME)) = UPPER(TRIM(\\'{}\\')) OR SJ.JOB_ID IS NOT NULL) AND NULLIF(TRIM(JL.LAYER), \\'\\') IS NOT NULL AND JL.START_TIME >= CONVERT_TIMEZONE(\\'UTC\\', \\'{}\\', TO_TIMESTAMP_NTZ(\\'{}\\'))), ENTITY_LAYERS AS (SELECT REGEXP_REPLACE(REGEXP_REPLACE(UPPER(TRIM(LOG_ENTITY)), \\'^.*[.]\\', \\'\\'), \\'^TASK_\\', \\'\\') AS ENTITY_KEY, MIN(LAYER) AS ENTITY_LAYER FROM RUN_JOBLOG WHERE NULLIF(TRIM(LOG_ENTITY), \\'\\') IS NOT NULL GROUP BY 1), JOB_LAYERS AS (SELECT SJ.JOB_KEY, MIN(RO.LAYER) AS OBJ_LAYER, MIN(RJ.LAYER) AS LOG_LAYER, MIN(SJ.CFG_LAYER) AS CFG_LAYER FROM SRC_JOBS SJ LEFT JOIN RUN_OBJ RO ON RO.JOB_ID = SJ.JOB_ID LEFT JOIN RUN_JOBLOG RJ ON RJ.JOB_ID = SJ.JOB_ID GROUP BY SJ.JOB_KEY), RUN_LAYER AS (SELECT COALESCE((SELECT LAYER FROM RUN_OBJ ORDER BY START_TIME ASC LIMIT 1), (SELECT LAYER FROM RUN_JOBLOG WHERE STATUS IN (\\'FAILED\\', \\'FAILURE\\', \\'ERROR\\') AND LAYER <> \\'S3\\' ORDER BY START_TIME ASC LIMIT 1)) AS L), REACHED AS (SELECT L FROM (SELECT COALESCE(JL.CFG_LAYER, {}) AS L, T.DONE_AT FROM (SELECT D.TASK_NAME AS LAYER_KEY, COALESCE(D.COMPLETED_TIME, D.LOG_TIMESTAMP) AS DONE_AT FROM {}.EDH_TASK_DAG_LOG D WHERE UPPER(D.ROOT_TASK_NAME) IN (UPPER(\\'{}\\'), UPPER(\\'{}\\')) AND UPPER(D.TASK_NAME) NOT IN (UPPER(\\'{}\\'), UPPER(\\'{}\\')) AND UPPER(TRIM(D.STATE)) IN (\\'SUCCEEDED\\', \\'SUCCESS\\', \\'SUCCESSFUL\\', \\'COMPLETED\\', \\'COMPLETE\\', \\'DONE\\') AND D.LOG_TIMESTAMP >= CONVERT_TIMEZONE(\\'UTC\\', COALESCE(TRY_TO_TIMESTAMP_TZ(REPLACE(\\'{}\\', \\'Z\\', \\'+00:00\\')), TRY_TO_TIMESTAMP_LTZ(\\'{}\\')))) T LEFT JOIN JOB_LAYERS JL ON JL.JOB_KEY = REGEXP_REPLACE(REGEXP_REPLACE(UPPER(TRIM(T.LAYER_KEY)), \\'^.*[.]\\', \\'\\'), \\'^TASK_\\', \\'\\')) WHERE L IS NOT NULL ORDER BY DONE_AT DESC LIMIT 1), F0 AS (SELECT D.TASK_NAME, D.ROOT_TASK_NAME, D.STATE, D.ERROR_MESSAGE, D.TASK_LOG_ID, D.SCHEDULED_TIME, D.COMPLETED_TIME, D.LOG_TIMESTAMP, D.TASK_NAME AS LAYER_KEY, JL.OBJ_LAYER, JL.LOG_LAYER, EL.ENTITY_LAYER, JL.CFG_LAYER, IFF(UPPER(D.TASK_NAME) IN (UPPER(\\'{}\\'), UPPER(\\'{}\\')), \\'ROOT\\', \\'CHILD\\') AS KIND FROM {}.EDH_TASK_DAG_LOG D LEFT JOIN JOB_LAYERS JL ON JL.JOB_KEY = REGEXP_REPLACE(REGEXP_REPLACE(UPPER(TRIM(D.TASK_NAME)), \\'^.*[.]\\', \\'\\'), \\'^TASK_\\', \\'\\') LEFT JOIN ENTITY_LAYERS EL ON EL.ENTITY_KEY = REGEXP_REPLACE(REGEXP_REPLACE(UPPER(TRIM(D.TASK_NAME)), \\'^.*[.]\\', \\'\\'), \\'^TASK_\\', \\'\\') WHERE UPPER(D.ROOT_TASK_NAME) IN (UPPER(\\'{}\\'), UPPER(\\'{}\\')) AND D.STATE IN (\\'FAILED\\', \\'FAILURE\\', \\'ERROR\\', \\'CANCELLED\\', \\'FAILED_AND_AUTO_SUSPENDED\\', \\'SKIPPED\\') AND D.LOG_TIMESTAMP >= CONVERT_TIMEZONE(\\'UTC\\', COALESCE(TRY_TO_TIMESTAMP_TZ(REPLACE(\\'{}\\', \\'Z\\', \\'+00:00\\')), TRY_TO_TIMESTAMP_LTZ(\\'{}\\')))), FAILED AS (SELECT F0.*, IFF(KIND = \\'ROOT\\', \\'ROOT\\', COALESCE(OBJ_LAYER, LOG_LAYER, ENTITY_LAYER, CFG_LAYER, {}, (SELECT L FROM RUN_LAYER), (SELECT L FROM REACHED), \\'UNKNOWN\\')) AS LAYER, ROW_NUMBER() OVER (ORDER BY IFF(KIND = \\'ROOT\\', 1, 0), LOG_TIMESTAMP ASC) AS RN FROM F0), LAYERS AS (SELECT LAYER, MIN(RN) AS FIRST_RN FROM FAILED WHERE LAYER <> \\'ROOT\\' OR NOT EXISTS (SELECT 1 FROM FAILED WHERE LAYER <> \\'ROOT\\') GROUP BY LAYER){} SELECT TASK_NAME, ROOT_TASK_NAME, STATE, LEFT(COALESCE(ERROR_MESSAGE, \\'(no error message)\\'), 2000), COALESCE(TO_VARCHAR(TASK_LOG_ID), \\'N/A\\'), COALESCE(TO_VARCHAR(SCHEDULED_TIME), \\'N/A\\'), COALESCE(TO_VARCHAR(COMPLETED_TIME), \\'N/A\\'), KIND, LAYER, (SELECT LISTAGG(LAYER, \\', \\') WITHIN GROUP (ORDER BY FIRST_RN) FROM LAYERS) AS FAILED_LAYERS, {} FROM FAILED WHERE RN = 1', $metadataSchema, $.SOURCE_NAME, $metadataSchema, $.SOURCE_NAME, $objectLogTimeZone, $$.Execution.StartTime, $metadataSchema, $.SOURCE_NAME, $objectLogTimeZone, $$.Execution.StartTime, $sqlTaskLayerCase, $metadataSchema, $taskName, $.rootTask, $taskName, $.rootTask, $$.Execution.StartTime, $$.Execution.StartTime, $taskName, $.rootTask, $metadataSchema, $taskName, $.rootTask, $$.Execution.StartTime, $$.Execution.StartTime, $sqlTaskLayerCase, $sqlBoundedFailedTasks, $sqlFailedTaskRowsHtml)",
+          "warehouse.$": "$sfWarehouse",
+          "timeout.$": "$sfStatementTimeout"
+        }
+      },
+      "ResultPath": "$.ChildTaskDetail",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.Http.StatusCode.429",
+            "States.Http.StatusCode.500",
+            "States.Http.StatusCode.502",
+            "States.Http.StatusCode.503",
+            "States.Http.StatusCode.504",
+            "Events.ConnectionResource.InternalError",
+            "States.Timeout"
+          ],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 2,
+          "BackoffRate": 2,
+          "MaxDelaySeconds": 30,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.ChildLookupError",
+          "Next": "EvaluateChildTaskLookup"
+        }
+      ],
+      "Next": "EvaluateChildTaskLookup"
+    },
+    "EvaluateChildTaskLookup": {
+      "Type": "Choice",
+      "Comment": "Chooses the next step from what that lookup found. After a reported success: a failed lookup means the success cannot be trusted; no failed task means the data items are checked next. After a reported failure: no row means the general failure email; a failed root task gets its own email; any other failed task goes on to list the data items that failed under it.",
+      "Choices": [
+        {
+          "And": [
+            {
+              "Variable": "$.ChildTaskDetail.ResponseBody.data",
+              "IsPresent": false
+            },
+            {
+              "Variable": "$dagReported",
+              "StringEquals": "COMPLETED"
+            }
+          ],
+          "Next": "PrepareVerificationFailedNotification"
+        },
+        {
+          "And": [
+            {
+              "Variable": "$.ChildTaskDetail.ResponseBody.data[0][0]",
+              "IsPresent": false
+            },
+            {
+              "Variable": "$dagReported",
+              "StringEquals": "COMPLETED"
+            }
+          ],
+          "Next": "GetFailedObjectsAcrossSource"
+        },
+        {
+          "Variable": "$.ChildTaskDetail.ResponseBody.data[0][0]",
+          "IsPresent": false,
+          "Next": "PrepareRootTaskFailureFallback"
+        },
+        {
+          "Variable": "$.ChildTaskDetail.ResponseBody.data[0][7]",
+          "StringEquals": "ROOT",
+          "Next": "PrepareRootTaskFailureNotification"
+        }
+      ],
+      "Default": "GetFailedTaskObjectDetails"
+    },
+    "PrepareRootTaskFailureFallback": {
+      "Type": "Pass",
+      "Comment": "Builds the email used when the chain failed but no log row names the failed task. It points the reader to EDH_TASK_DAG_LOG. The times shown are this workflow's start and end.",
+      "Parameters": {
+        "component": "SNOWFLAKE_ROOT_TASK",
+        "taskName.$": "$taskName",
+        "rootTaskName.$": "$taskName",
+        "status": "FAILED",
+        "runId.$": "States.Format('unknown -- query {}.EDH_TASK_DAG_LOG for this root task', $metadataSchema)",
+        "startedAt.$": "$$.Execution.StartTime",
+        "completedAt.$": "$$.State.EnteredTime",
+        "errorMessage": "Root task reported FAILED, but the failed-task lookup returned no row or itself failed. Check EDH_TASK_DAG_LOG directly for the failed task and its ERROR_MESSAGE.",
+        "sourceName.$": "$.SOURCE_NAME",
+        "objectFailureRows": "<tr><td colspan='3' style='padding:8px; text-align:center;'>No object-level detail available -- the failed task could not be resolved.</td></tr>",
+        "failedLayer": "UNKNOWN",
+        "failedLayers": "UNKNOWN",
+        "failedTaskRows": ""
+      },
+      "ResultPath": "$.FailureDetail",
+      "Next": "ResolveSesFromAddress"
+    },
+    "PrepareRootTaskFailureNotification": {
+      "Type": "Pass",
+      "Comment": "Builds the email when the failed task is the root task itself. The root task does not process data items, so no item table is shown.",
+      "Parameters": {
+        "component": "SNOWFLAKE_ROOT_TASK",
+        "taskName.$": "$.ChildTaskDetail.ResponseBody.data[0][0]",
+        "rootTaskName.$": "$.ChildTaskDetail.ResponseBody.data[0][1]",
+        "status.$": "$.ChildTaskDetail.ResponseBody.data[0][2]",
+        "runId.$": "$.ChildTaskDetail.ResponseBody.data[0][4]",
+        "startedAt.$": "$.ChildTaskDetail.ResponseBody.data[0][5]",
+        "completedAt.$": "$.ChildTaskDetail.ResponseBody.data[0][6]",
+        "errorMessage.$": "States.Format('Root task failed and no child task failure was recorded for this run: {}', $.ChildTaskDetail.ResponseBody.data[0][3])",
+        "sourceName.$": "$.SOURCE_NAME",
+        "objectFailureRows.$": "$htmlNotApplicable",
+        "failedLayer": "ROOT",
+        "failedLayers.$": "$.ChildTaskDetail.ResponseBody.data[0][9]",
+        "failedTaskRows.$": "$.ChildTaskDetail.ResponseBody.data[0][10]"
+      },
+      "ResultPath": "$.FailureDetail",
+      "Next": "ResolveSesFromAddress"
+    },
+    "GetFailedTaskObjectDetails": {
+      "Type": "Task",
+      "Comment": "Lists every data item of this source (OBJECT_LOG.SOURCE_NAME, or a JOB_CONFIG job of the source) marked FAILED, FAILURE or ERROR in OBJECT_LOG during this run, with its layer. It does not depend on the failed task being a job, so a failure in a task such as a DBT validation still shows the items that failed. Up to 50 items are shown, with a note when there are more.",
+      "Resource": "arn:aws:states:::http:invoke",
+      "Parameters": {
+        "ApiEndpoint.$": "$sfApiEndpoint",
+        "Method": "POST",
+        "Authentication": {
+          "ConnectionArn": "arn:aws:events:us-east-1:334296257544:connection/Snowflake-SQLAPI-Connection/01f03f2f-aced-419f-90f7-ff11cfc437cf"
+        },
+        "Headers.$": "$sfHeaders",
+        "RequestBody": {
+          "statement.$": "States.Format('WITH SRC_JOBS AS (SELECT DISTINCT JOB_ID FROM {}.JOB_CONFIG WHERE UPPER(TRIM(SOURCE_NAME)) = UPPER(TRIM(\\'{}\\'))), FAILED_OBJECTS AS (SELECT OL.JOB_ID, OL.OBJECT_ID, OL.MESSAGE, OL.LAYER FROM {}.OBJECT_LOG OL LEFT JOIN SRC_JOBS SJ ON SJ.JOB_ID = OL.JOB_ID WHERE (UPPER(TRIM(OL.SOURCE_NAME)) = UPPER(TRIM(\\'{}\\')) OR SJ.JOB_ID IS NOT NULL) AND UPPER(TRIM(OL.STATUS)) IN (\\'FAILED\\', \\'FAILURE\\', \\'ERROR\\') AND OL.START_TIME >= CONVERT_TIMEZONE(\\'UTC\\', \\'{}\\', TO_TIMESTAMP_NTZ(\\'{}\\')) AND OL.START_TIME <= CONVERT_TIMEZONE(\\'UTC\\', \\'{}\\', TO_TIMESTAMP_NTZ(\\'{}\\'))){} SELECT {}', $metadataSchema, $.SOURCE_NAME, $metadataSchema, $.SOURCE_NAME, $objectLogTimeZone, $$.Execution.StartTime, $objectLogTimeZone, $$.State.EnteredTime, $sqlBoundedObjects, $sqlObjectRowsHtml)",
+          "warehouse.$": "$sfWarehouse",
+          "timeout.$": "$sfStatementTimeout"
+        }
+      },
+      "ResultPath": "$.TaskObjectFailureDetails",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.Http.StatusCode.429",
+            "States.Http.StatusCode.500",
+            "States.Http.StatusCode.502",
+            "States.Http.StatusCode.503",
+            "States.Http.StatusCode.504",
+            "Events.ConnectionResource.InternalError",
+            "States.Timeout"
+          ],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 2,
+          "BackoffRate": 2,
+          "MaxDelaySeconds": 30,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.TaskObjectFailureLookupError",
+          "Next": "PrepareTaskObjectFailureFallback"
+        }
+      ],
+      "Next": "CheckTaskObjectFailureDataPresent"
+    },
+    "CheckTaskObjectFailureDataPresent": {
+      "Type": "Choice",
+      "Comment": "Uses the list of failed items when Snowflake returned one; otherwise puts a short note in its place so the email can still be sent.",
+      "Choices": [
+        {
+          "Variable": "$.TaskObjectFailureDetails.ResponseBody.data[0][0]",
+          "IsPresent": false,
+          "Next": "PrepareTaskObjectFailureFallback"
+        }
+      ],
+      "Default": "PrepareChildTaskFailureNotification"
+    },
+    "PrepareTaskObjectFailureFallback": {
+      "Type": "Pass",
+      "Comment": "Writes the note used when the failed-item list could not be loaded. The email still names the failed task and its error.",
+      "Parameters": {
+        "ResponseBody": {
+          "data.$": "States.Array(States.Array($htmlObjectLookupFailed))"
+        }
+      },
+      "ResultPath": "$.TaskObjectFailureDetails",
+      "Next": "PrepareChildTaskFailureNotification"
+    },
+    "PrepareChildTaskFailureNotification": {
+      "Type": "Pass",
+      "Comment": "Builds the email for a failed task that runs after the root task, such as bronze, silver or gold. It names the task's layer, lists every task that failed in this run with its layer and error, and the data items that failed under them.",
+      "Parameters": {
+        "component": "SNOWFLAKE_CHILD_TASK",
+        "taskName.$": "$.ChildTaskDetail.ResponseBody.data[0][0]",
+        "rootTaskName.$": "$.ChildTaskDetail.ResponseBody.data[0][1]",
+        "status.$": "$.ChildTaskDetail.ResponseBody.data[0][2]",
+        "runId.$": "$.ChildTaskDetail.ResponseBody.data[0][4]",
+        "startedAt.$": "$.ChildTaskDetail.ResponseBody.data[0][5]",
+        "completedAt.$": "$.ChildTaskDetail.ResponseBody.data[0][6]",
+        "errorMessage.$": "$.ChildTaskDetail.ResponseBody.data[0][3]",
+        "sourceName.$": "$.SOURCE_NAME",
+        "objectFailureRows.$": "$.TaskObjectFailureDetails.ResponseBody.data[0][0]",
+        "failedLayer.$": "$.ChildTaskDetail.ResponseBody.data[0][8]",
+        "failedLayers.$": "$.ChildTaskDetail.ResponseBody.data[0][9]",
+        "failedTaskRows.$": "$.ChildTaskDetail.ResponseBody.data[0][10]"
+      },
+      "ResultPath": "$.FailureDetail",
+      "Next": "ResolveSesFromAddress"
+    },
+    "GetFailedObjectsAcrossSource": {
+      "Type": "Task",
+      "Comment": "The chain reported success, but a task can finish while some of its data items failed. This query looks for any item of this source marked FAILED in OBJECT_LOG during this run before the load is accepted. Columns 4 and 5 give the layer of the first failed item and every layer with a failed item (OBJECT_LOG.LAYER, else JOB_CONFIG.LAYER, else the job name, else UNKNOWN).",
+      "Resource": "arn:aws:states:::http:invoke",
+      "Parameters": {
+        "ApiEndpoint.$": "$sfApiEndpoint",
+        "Method": "POST",
+        "Authentication": {
+          "ConnectionArn": "arn:aws:events:us-east-1:334296257544:connection/Snowflake-SQLAPI-Connection/01f03f2f-aced-419f-90f7-ff11cfc437cf"
+        },
+        "Headers.$": "$sfHeaders",
+        "RequestBody": {
+          "statement.$": "States.Format('WITH JOB_NAMES AS (SELECT JOB_ID, MIN(NULLIF(TRIM(JOB_NAME), \\'\\')) AS JOB_NAME, MIN(NULLIF(TRIM(JOB_NAME), \\'\\')) AS LAYER_KEY, MIN(NULLIF(UPPER(TRIM(LAYER)), \\'\\')) AS CFG_LAYER FROM {}.JOB_CONFIG GROUP BY JOB_ID), FAILED_OBJECTS AS (SELECT OL.JOB_ID, OL.OBJECT_ID, OL.MESSAGE, OL.LAYER, OL.START_TIME, OL.END_TIME, COALESCE(JN.JOB_NAME, \\'UNKNOWN (JOB_ID \\' || COALESCE(TO_VARCHAR(OL.JOB_ID), \\'NULL\\') || \\')\\') AS JOB_NAME, COALESCE(NULLIF(UPPER(TRIM(OL.LAYER)), \\'\\'), JN.CFG_LAYER, {}, \\'UNKNOWN\\') AS RESOLVED_LAYER FROM {}.OBJECT_LOG OL LEFT JOIN JOB_NAMES JN ON JN.JOB_ID = OL.JOB_ID WHERE UPPER(TRIM(OL.SOURCE_NAME)) = UPPER(TRIM(\\'{}\\')) AND OL.STATUS = \\'FAILED\\' AND OL.START_TIME >= CONVERT_TIMEZONE(\\'UTC\\', \\'{}\\', TO_TIMESTAMP_NTZ(\\'{}\\')) AND OL.START_TIME <= CONVERT_TIMEZONE(\\'UTC\\', \\'{}\\', TO_TIMESTAMP_NTZ(\\'{}\\'))){}, FIRST_FAILED AS (SELECT JOB_NAME, START_TIME, END_TIME, RESOLVED_LAYER FROM FAILED_OBJECTS ORDER BY START_TIME ASC LIMIT 1) SELECT (SELECT JOB_NAME FROM FIRST_FAILED) AS FIRST_FAILED_JOBNAME, (SELECT COALESCE(TO_VARCHAR(START_TIME), \\'N/A\\') FROM FIRST_FAILED) AS FIRST_FAILED_STARTTIME, (SELECT COALESCE(TO_VARCHAR(END_TIME), \\'N/A\\') FROM FIRST_FAILED) AS FIRST_FAILED_ENDTIME, {}, (SELECT RESOLVED_LAYER FROM FIRST_FAILED) AS FIRST_FAILED_LAYER, (SELECT LISTAGG(RESOLVED_LAYER, \\', \\') WITHIN GROUP (ORDER BY FIRST_START) FROM (SELECT RESOLVED_LAYER, MIN(START_TIME) AS FIRST_START FROM FAILED_OBJECTS GROUP BY RESOLVED_LAYER)) AS FAILED_LAYERS', $metadataSchema, $sqlTaskLayerCase, $metadataSchema, $.SOURCE_NAME, $objectLogTimeZone, $$.Execution.StartTime, $objectLogTimeZone, $$.State.EnteredTime, $sqlBoundedObjects, $sqlObjectRowsHtml)",
+          "warehouse.$": "$sfWarehouse",
+          "timeout.$": "$sfStatementTimeout"
+        }
+      },
+      "ResultPath": "$.ObjectsAcrossSource",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.Http.StatusCode.429",
+            "States.Http.StatusCode.500",
+            "States.Http.StatusCode.502",
+            "States.Http.StatusCode.503",
+            "States.Http.StatusCode.504",
+            "Events.ConnectionResource.InternalError",
+            "States.Timeout"
+          ],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 2,
+          "BackoffRate": 2,
+          "MaxDelaySeconds": 30,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.ObjectsAcrossSourceLookupError",
+          "Next": "PrepareVerificationFailedNotification"
+        }
+      ],
+      "Next": "EvaluateObjectsAcrossSource"
+    },
+    "EvaluateObjectsAcrossSource": {
+      "Type": "Choice",
+      "Comment": "The only step that can end the run as a success. No result means the check could not be done, so the run fails. A failed item means the item-failure email. No failed items means the load is complete.",
+      "Choices": [
+        {
+          "Variable": "$.ObjectsAcrossSource.ResponseBody.data[0][3]",
+          "IsPresent": false,
+          "Next": "PrepareVerificationFailedNotification"
+        },
+        {
+          "And": [
+            {
+              "Variable": "$.ObjectsAcrossSource.ResponseBody.data[0][0]",
+              "IsString": true
+            },
+            {
+              "Not": {
+                "Variable": "$.ObjectsAcrossSource.ResponseBody.data[0][0]",
+                "StringEquals": ""
+              }
+            }
+          ],
+          "Next": "PrepareObjectLevelFailureNotification"
+        }
+      ],
+      "Default": "WorkflowSucceeded"
+    },
+    "PrepareObjectLevelFailureNotification": {
+      "Type": "Pass",
+      "Comment": "Builds the email sent when the tasks reported success but one or more data items failed. It names the first job with a failure and lists the failed items.",
+      "Parameters": {
+        "component": "SNOWFLAKE_TASK_OBJECT_FAILURE",
+        "taskName.$": "$.ObjectsAcrossSource.ResponseBody.data[0][0]",
+        "rootTaskName.$": "$taskName",
+        "status": "Task-level status reported SUCCEEDED, but an object it processed FAILED",
+        "runId": "N/A (derived from OBJECT_LOG)",
+        "startedAt.$": "$.ObjectsAcrossSource.ResponseBody.data[0][1]",
+        "completedAt.$": "$.ObjectsAcrossSource.ResponseBody.data[0][2]",
+        "errorMessage.$": "States.Format('Task {} ({} layer) reported success in EDH_TASK_DAG_LOG, but one or more objects it processed FAILED in OBJECT_LOG (layers with failed objects: {}) -- see Failed Object Details below.', $.ObjectsAcrossSource.ResponseBody.data[0][0], $.ObjectsAcrossSource.ResponseBody.data[0][4], $.ObjectsAcrossSource.ResponseBody.data[0][5])",
+        "sourceName.$": "$.SOURCE_NAME",
+        "objectFailureRows.$": "$.ObjectsAcrossSource.ResponseBody.data[0][3]",
+        "failedLayer.$": "$.ObjectsAcrossSource.ResponseBody.data[0][4]",
+        "failedLayers.$": "$.ObjectsAcrossSource.ResponseBody.data[0][5]",
+        "failedTaskRows": ""
+      },
+      "ResultPath": "$.FailureDetail",
+      "Next": "ResolveSesFromAddress"
+    },
+    "PrepareVerificationFailedNotification": {
+      "Type": "Pass",
+      "Comment": "Builds the email sent when the chain reported success but the double-check query failed or returned nothing. The run is not accepted as a success until someone checks the logs.",
+      "Parameters": {
+        "component": "SNOWFLAKE_TASK_OBJECT_FAILURE",
+        "taskName": "Unknown (verification query failed)",
+        "rootTaskName.$": "$taskName",
+        "status": "UNKNOWN -- could not verify the reported success",
+        "runId": "N/A",
+        "startedAt.$": "$$.Execution.StartTime",
+        "completedAt.$": "$$.State.EnteredTime",
+        "errorMessage": "The DAG reported success, but a verification query against EDH_TASK_DAG_LOG or OBJECT_LOG failed or returned no data. Treated as a failure requiring manual verification -- check both tables directly for this SOURCE_NAME.",
+        "sourceName.$": "$.SOURCE_NAME",
+        "objectFailureRows.$": "$htmlObjectLookupFailed",
+        "failedLayer": "UNKNOWN",
+        "failedLayers": "UNKNOWN",
+        "failedTaskRows": ""
+      },
+      "ResultPath": "$.FailureDetail",
+      "Next": "ResolveSesFromAddress"
+    },
+    "WorkflowSucceeded": {
+      "Type": "Succeed",
+      "Comment": "The task chain finished and no task or data item failed for this source. The daily load is complete. No email is sent."
+    },
+    "ValidateGlueErrorCause": {
+      "Type": "Choice",
+      "Comment": "Glue failed. If Glue returned a readable job result, its details are used in the email. If not (the job could not start, or this workflow stopped waiting after two hours), a shorter email is prepared.",
+      "Choices": [
+        {
+          "Variable": "$.GlueJobError.Cause",
+          "IsPresent": false,
+          "Next": "PrepareGlueFailureNotificationMinimal"
+        },
+        {
+          "And": [
+            {
+              "Variable": "$.GlueJobError.Cause",
+              "IsString": true
+            },
+            {
+              "Variable": "$.GlueJobError.Cause",
+              "StringMatches": "{*"
+            },
+            {
+              "Variable": "$.GlueJobError.Cause",
+              "StringMatches": "*}"
+            }
+          ],
+          "Next": "ParseGlueErrorCause"
+        }
+      ],
+      "Default": "PrepareGlueFailureNotificationMinimal"
+    },
+    "ParseGlueErrorCause": {
+      "Type": "Pass",
+      "QueryLanguage": "JSONata",
+      "Comment": "Reads the Glue job result and keeps the status, run id, error message, start time and finish time for the email. Any missing value is replaced with a short explanation so the email can always be built.",
+      "Output": "{% ($c := $parse($states.input.GlueJobError.Cause); $text := function($v, $d) { $type($v) = 'string' and $v != '' ? $v : $d }; $time := function($v) { $type($v) = 'number' ? $fromMillis($v, '[Y0001]-[M01]-[D01] [H01]:[m01]:[s01] UTC') : $text($v, 'Unknown') }; $merge([$states.input, {'GlueRun': {'status': $text($c.JobRunState, 'FAILED'), 'runId': $text($c.Id, 'N/A'), 'errorMessage': $text($c.ErrorMessage, 'Glue reported no error message -- check the job run logs.'), 'startedAt': $time($c.StartedOn), 'completedAt': $time($c.CompletedOn)}}])) %}",
+      "Next": "GetFailedGlueObjectDetails"
+    },
+    "GetFailedGlueObjectDetails": {
+      "Type": "Task",
+      "Comment": "After a Glue failure, lists the data items of this source marked FAILED in OBJECT_LOG during this run, so they appear in the Glue failure email.",
+      "Resource": "arn:aws:states:::http:invoke",
+      "Parameters": {
+        "ApiEndpoint.$": "$sfApiEndpoint",
+        "Method": "POST",
+        "Authentication": {
+          "ConnectionArn": "arn:aws:events:us-east-1:334296257544:connection/Snowflake-SQLAPI-Connection/01f03f2f-aced-419f-90f7-ff11cfc437cf"
+        },
+        "Headers.$": "$sfHeaders",
+        "RequestBody": {
+          "statement.$": "States.Format('WITH FAILED_OBJECTS AS (SELECT JOB_ID, OBJECT_ID, MESSAGE, LAYER FROM {}.OBJECT_LOG WHERE UPPER(TRIM(SOURCE_NAME)) = UPPER(TRIM(\\'{}\\')) AND STATUS = \\'FAILED\\' AND START_TIME >= CONVERT_TIMEZONE(\\'UTC\\', \\'{}\\', TO_TIMESTAMP_NTZ(\\'{}\\')) AND START_TIME <= CONVERT_TIMEZONE(\\'UTC\\', \\'{}\\', TO_TIMESTAMP_NTZ(\\'{}\\'))){} SELECT {}', $metadataSchema, $.SOURCE_NAME, $objectLogTimeZone, $$.Execution.StartTime, $objectLogTimeZone, $$.State.EnteredTime, $sqlBoundedObjects, $sqlObjectRowsHtml)",
+          "warehouse.$": "$sfWarehouse",
+          "timeout.$": "$sfStatementTimeout"
+        }
+      },
+      "ResultPath": "$.ObjectFailureDetails",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.Http.StatusCode.429",
+            "States.Http.StatusCode.500",
+            "States.Http.StatusCode.502",
+            "States.Http.StatusCode.503",
+            "States.Http.StatusCode.504",
+            "Events.ConnectionResource.InternalError",
+            "States.Timeout"
+          ],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 2,
+          "BackoffRate": 2,
+          "MaxDelaySeconds": 30,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.ObjectFailureLookupError",
+          "Next": "PrepareGlueObjectFailureFallback"
+        }
+      ],
+      "Next": "CheckGlueObjectFailureDataPresent"
+    },
+    "CheckGlueObjectFailureDataPresent": {
+      "Type": "Choice",
+      "Comment": "Uses the list of failed items when Snowflake returned one; otherwise puts a short note in its place so the email can still be sent.",
+      "Choices": [
+        {
+          "Variable": "$.ObjectFailureDetails.ResponseBody.data[0][0]",
+          "IsPresent": false,
+          "Next": "PrepareGlueObjectFailureFallback"
+        }
+      ],
+      "Default": "PrepareGlueFailureNotification"
+    },
+    "PrepareGlueObjectFailureFallback": {
+      "Type": "Pass",
+      "Comment": "Writes the note used when the Glue email could not load the failed-item list. The email still describes the Glue failure.",
+      "Parameters": {
+        "ResponseBody": {
+          "data.$": "States.Array(States.Array($htmlObjectLookupFailed))"
+        }
+      },
+      "ResultPath": "$.ObjectFailureDetails",
+      "Next": "PrepareGlueFailureNotification"
+    },
+    "PrepareGlueFailureNotification": {
+      "Type": "Pass",
+      "Comment": "Builds the email for a Glue job that started and then failed: its status, run id, error and any failed data items. The Snowflake root task is not started.",
+      "Parameters": {
+        "component": "GLUE",
+        "taskName.$": "$.glueJobName",
+        "rootTaskName": "N/A (Glue failed before the Snowflake root task was triggered)",
+        "status.$": "$.GlueRun.status",
+        "runId.$": "$.GlueRun.runId",
+        "startedAt.$": "$.GlueRun.startedAt",
+        "completedAt.$": "$.GlueRun.completedAt",
+        "errorMessage.$": "$.GlueRun.errorMessage",
+        "sourceName.$": "$.SOURCE_NAME",
+        "objectFailureRows.$": "$.ObjectFailureDetails.ResponseBody.data[0][0]",
+        "failedLayer": "GLUE",
+        "failedLayers": "GLUE",
+        "failedTaskRows": ""
+      },
+      "ResultPath": "$.FailureDetail",
+      "Next": "ResolveSesFromAddress"
+    },
+    "PrepareGlueFailureNotificationMinimal": {
+      "Type": "Pass",
+      "Comment": "Builds the email when the Glue job could not be started, ran longer than two hours, or returned an unreadable error. It includes the job name and the raw error. The Snowflake root task is not started.",
+      "Parameters": {
+        "component": "GLUE",
+        "taskName.$": "$.glueJobName",
+        "rootTaskName": "N/A (Glue failed before the Snowflake root task was triggered)",
+        "status": "FAILED",
+        "runId": "N/A (no job run result available)",
+        "startedAt.$": "$$.Execution.StartTime",
+        "completedAt.$": "$$.State.EnteredTime",
+        "errorMessage.$": "States.Format('Glue job {} could not be started or monitored: {}', $.glueJobName, States.JsonToString($.GlueJobError))",
+        "sourceName.$": "$.SOURCE_NAME",
+        "objectFailureRows.$": "$htmlNotApplicable",
+        "failedLayer": "GLUE",
+        "failedLayers": "GLUE",
+        "failedTaskRows": ""
+      },
+      "ResultPath": "$.FailureDetail",
+      "Next": "ResolveSesFromAddress"
+    },
+    "ResolveSesFromAddress": {
+      "Type": "Choice",
+      "Comment": "Every failure email except a rejected request passes through here. If the request supplied its own sender address (sesFromAddress), that address is used; otherwise the standard sender is kept.",
+      "Choices": [
+        {
+          "Variable": "$.sesFromAddress",
+          "IsPresent": false,
+          "Next": "GetNotificationRecipients"
+        },
+        {
+          "And": [
+            {
+              "Variable": "$.sesFromAddress",
+              "IsString": true
+            },
+            {
+              "Not": {
+                "Variable": "$.sesFromAddress",
+                "StringEquals": ""
+              }
+            }
+          ],
+          "Next": "UseCallerSesSender"
+        }
+      ],
+      "Default": "GetNotificationRecipients"
+    },
+    "UseCallerSesSender": {
+      "Type": "Pass",
+      "Comment": "Saves the sender address supplied in the request in place of the standard sender.",
+      "Assign": {
+        "sesSender.$": "$.sesFromAddress"
+      },
+      "Next": "GetNotificationRecipients"
+    },
+    "GetNotificationRecipients": {
+      "Type": "Task",
+      "Comment": "Looks up the failure-email addresses saved on the active jobs of this source in JOB_CONFIG. Lists separated by commas or semicolons are split, duplicates removed, and at most 50 addresses kept.",
+      "Resource": "arn:aws:states:::http:invoke",
+      "Parameters": {
+        "ApiEndpoint.$": "$sfApiEndpoint",
+        "Method": "POST",
+        "Authentication": {
+          "ConnectionArn": "arn:aws:events:us-east-1:334296257544:connection/Snowflake-SQLAPI-Connection/01f03f2f-aced-419f-90f7-ff11cfc437cf"
+        },
+        "Headers.$": "$sfHeaders",
+        "RequestBody": {
+          "statement.$": "States.Format('WITH RECIPIENTS AS (SELECT DISTINCT TRIM(S.VALUE) AS RECIPIENT FROM {}.JOB_CONFIG JC, LATERAL SPLIT_TO_TABLE(REPLACE(JC.JOB_FAILURE_NOTIFICATION, \\';\\', \\',\\'), \\',\\') S WHERE JC.IS_ACTIVE = TRUE AND TRIM(S.VALUE) <> \\'\\' AND UPPER(TRIM(JC.SOURCE_NAME)) = UPPER(TRIM(\\'{}\\'))){}', $metadataSchema, $.FailureDetail.sourceName, $sqlBoundedRecipients)",
+          "warehouse.$": "$sfWarehouse",
+          "timeout.$": "$sfStatementTimeout"
+        }
+      },
+      "ResultPath": "$.RecipientsResult",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.Http.StatusCode.429",
+            "States.Http.StatusCode.500",
+            "States.Http.StatusCode.502",
+            "States.Http.StatusCode.503",
+            "States.Http.StatusCode.504",
+            "Events.ConnectionResource.InternalError",
+            "States.Timeout"
+          ],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 2,
+          "BackoffRate": 2,
+          "MaxDelaySeconds": 30,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.RecipientsLookupError",
+          "Next": "GetFallbackRecipientsAcrossAllGroups"
+        }
+      ],
+      "Next": "EvaluateRecipientsFound"
+    },
+    "EvaluateRecipientsFound": {
+      "Type": "Choice",
+      "Comment": "Sends the email if this source has at least one address; otherwise (empty list or failed lookup) tries the backup list.",
+      "Choices": [
+        {
+          "Variable": "$.RecipientsResult.ResponseBody.data[0][0]",
+          "IsPresent": false,
+          "Next": "GetFallbackRecipientsAcrossAllGroups"
+        },
+        {
+          "And": [
+            {
+              "Variable": "$.RecipientsResult.ResponseBody.data[0][0]",
+              "IsString": true
+            },
+            {
+              "Not": {
+                "Variable": "$.RecipientsResult.ResponseBody.data[0][0]",
+                "StringEquals": ""
+              }
+            }
+          ],
+          "Next": "SendFailureEmail"
+        }
+      ],
+      "Default": "GetFallbackRecipientsAcrossAllGroups"
+    },
+    "GetFallbackRecipientsAcrossAllGroups": {
+      "Type": "Task",
+      "Comment": "Backup when this source has nobody to notify: looks up the failure-email addresses on every active job, limited to 50.",
+      "Resource": "arn:aws:states:::http:invoke",
+      "Parameters": {
+        "ApiEndpoint.$": "$sfApiEndpoint",
+        "Method": "POST",
+        "Authentication": {
+          "ConnectionArn": "arn:aws:events:us-east-1:334296257544:connection/Snowflake-SQLAPI-Connection/01f03f2f-aced-419f-90f7-ff11cfc437cf"
+        },
+        "Headers.$": "$sfHeaders",
+        "RequestBody": {
+          "statement.$": "States.Format('WITH RECIPIENTS AS (SELECT DISTINCT TRIM(S.VALUE) AS RECIPIENT FROM {}.JOB_CONFIG JC, LATERAL SPLIT_TO_TABLE(REPLACE(JC.JOB_FAILURE_NOTIFICATION, \\';\\', \\',\\'), \\',\\') S WHERE JC.IS_ACTIVE = TRUE AND TRIM(S.VALUE) <> \\'\\'){}', $metadataSchema, $sqlBoundedRecipients)",
+          "warehouse.$": "$sfWarehouse",
+          "timeout.$": "$sfStatementTimeout"
+        }
+      },
+      "ResultPath": "$.RecipientsResult",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.Http.StatusCode.429",
+            "States.Http.StatusCode.500",
+            "States.Http.StatusCode.502",
+            "States.Http.StatusCode.503",
+            "States.Http.StatusCode.504",
+            "Events.ConnectionResource.InternalError",
+            "States.Timeout"
+          ],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 2,
+          "BackoffRate": 2,
+          "MaxDelaySeconds": 30,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.FallbackRecipientsLookupError",
+          "Next": "PrepareEmergencyRecipients"
+        }
+      ],
+      "Next": "EvaluateFallbackRecipientsFound"
+    },
+    "EvaluateFallbackRecipientsFound": {
+      "Type": "Choice",
+      "Comment": "Sends the email if the backup list has at least one address; otherwise uses the emergency contact.",
+      "Choices": [
+        {
+          "Variable": "$.RecipientsResult.ResponseBody.data[0][0]",
+          "IsPresent": false,
+          "Next": "PrepareEmergencyRecipients"
+        },
+        {
+          "And": [
+            {
+              "Variable": "$.RecipientsResult.ResponseBody.data[0][0]",
+              "IsString": true
+            },
+            {
+              "Not": {
+                "Variable": "$.RecipientsResult.ResponseBody.data[0][0]",
+                "StringEquals": ""
+              }
+            }
+          ],
+          "Next": "SendFailureEmail"
+        }
+      ],
+      "Default": "PrepareEmergencyRecipients"
+    },
+    "PrepareEmergencyRecipients": {
+      "Type": "Pass",
+      "Comment": "Uses the emergency contact: for a rejected request, and whenever neither recipient lookup returns anyone, so a failure is never left unreported.",
+      "Parameters": {
+        "ResponseBody": {
+          "data.$": "States.Array(States.Array($emergencyRecipient))"
+        }
+      },
+      "ResultPath": "$.RecipientsResult",
+      "Next": "SendFailureEmail"
+    },
+    "SendFailureEmail": {
+      "Type": "Task",
+      "QueryLanguage": "JSONata",
+      "Comment": "Sends the one failure email for this run. The subject names what failed, including the failed layer(s) when known (for example 'SILVER, GOLD layer'); the body shows the source, component, task, status, run id, times, error and any failed data items. Every text value is made HTML-safe here, in one place ($esc), so an error message containing < or & cannot break the email layout. The other-failed-task rows (shown only when more than one task failed) and the failed-item rows are already safe HTML built by Snowflake. A temporary sending problem is retried; if the email still cannot be sent, the run still ends as failed.",
+      "Resource": "arn:aws:states:::aws-sdk:ses:sendEmail",
+      "Arguments": "{% ($d := $states.input.FailureDetail; $lyr := $string($d.failedLayers); $esc := function($v) { $replace($replace($replace($string($v), '&', '&amp;'), '<', '&lt;'), '>', '&gt;') }; $row := function($label, $v) { '<tr><td style=\"padding: 4px 8px; font-weight: bold;\">' & $label & '</td><td style=\"padding: 4px 8px;\">' & $esc($v) & '</td></tr>' }; {'Source': $sesSender, 'Destination': {'ToAddresses': $split($states.input.RecipientsResult.ResponseBody.data[0][0], ',')}, 'Message': {'Subject': {'Data': 'Orchestration failed - ' & ($lyr != 'N/A' and $lyr != 'UNKNOWN' and $lyr != '' and $lyr != 'null' ? $lyr & ' layer - ' : '') & $string($d.taskName)}, 'Body': {'Html': {'Data': '<html><body style=\"font-family: Arial, sans-serif;\"><h2 style=\"color:#000000;\">Orchestration Summary</h2><table style=\"border-collapse: collapse;\">' & $row('State Machine', $states.context.StateMachine.Name) & $row('Source Name', $d.sourceName) & $row('Failed Component', $d.component) & $row('Failed Layer(s)', $d.failedLayers) & $row('Task Name', $d.taskName) & $row('Root Task Name', $d.rootTaskName) & $row('Status', $d.status) & $row('Run ID', $d.runId) & $row('Started At', $d.startedAt) & $row('Completed At', $d.completedAt) & '</table><h3>Error Details</h3><table border=\"1\" style=\"border-collapse: collapse; width: 100%; font-family: Arial, sans-serif;\"><tr style=\"background-color: #ffe6e6;\"><td style=\"padding: 8px;\">' & $esc($d.errorMessage) & '</td></tr></table>' & ($type($d.failedTaskRows) = 'string' and $d.failedTaskRows != '' ? '<h3>Other Failed Tasks in this Run</h3><table border=\"1\" style=\"border-collapse: collapse; width: 100%; font-family: Arial, sans-serif;\"><tr style=\"background-color: #f2f2f2;\"><th style=\"padding: 8px; text-align: left;\">Layer</th><th style=\"padding: 8px; text-align: left;\">Task</th><th style=\"padding: 8px; text-align: left;\">State</th><th style=\"padding: 8px; text-align: left;\">Error Message</th></tr>' & $d.failedTaskRows & '</table>' : '') & '<h3>Failed Object Details</h3><table border=\"1\" style=\"border-collapse: collapse; width: 100%; font-family: Arial, sans-serif;\"><tr style=\"background-color: #f2f2f2;\"><th style=\"padding: 8px; text-align: left;\">Job ID</th><th style=\"padding: 8px; text-align: left;\">Object ID</th><th style=\"padding: 8px; text-align: left;\">Layer</th><th style=\"padding: 8px; text-align: left;\">Error Message</th></tr>' & $d.objectFailureRows & '</table><p style=\"font-family: Arial, sans-serif;\">You can find more information in the JOB_LOG and OBJECT_LOG tables.</p></body></html>'}}}}) %}",
+      "Output": "{% $states.input %}",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Ses.SesException",
+            "States.Timeout"
+          ],
+          "IntervalSeconds": 3,
+          "MaxAttempts": 3,
+          "BackoffRate": 2,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Output": "{% $merge([$states.input, {'NotifyError': $states.errorOutput}]) %}",
+          "Next": "RouteFailureToFailState"
+        }
+      ],
+      "Next": "RouteFailureToFailState"
+    },
+    "RouteFailureToFailState": {
+      "Type": "Choice",
+      "Comment": "Ends the run with a result name that says what failed: bad request, Glue, reaching Snowflake, the 30-minute wait running out, or the Snowflake layer (bronze, silver or gold) whose task or data items failed first. A failed root task, an unrecognised layer or a success that could not be verified ends as SnowflakeLoadFailed.",
+      "Choices": [
+        {
+          "Variable": "$.FailureDetail.component",
+          "StringEquals": "INPUT_VALIDATION",
+          "Next": "InvalidExecutionInput"
+        },
+        {
+          "Variable": "$.FailureDetail.component",
+          "StringEquals": "GLUE",
+          "Next": "GlueJobFailed"
+        },
+        {
+          "Variable": "$.FailureDetail.component",
+          "StringEquals": "VALIDATION",
+          "Next": "ValidationJobFailed"
+        },
+        {
+          "Variable": "$.FailureDetail.component",
+          "StringEquals": "SNOWFLAKE_ORCHESTRATION",
+          "Next": "SnowflakeOrchestrationFailed"
+        },
+        {
+          "Variable": "$.FailureDetail.component",
+          "StringEquals": "POLLING_TIMEOUT",
+          "Next": "PollingTimedOut"
+        },
+        {
+          "And": [
+            {
+              "Variable": "$.FailureDetail.failedLayer",
+              "IsPresent": true
+            },
+            {
+              "Variable": "$.FailureDetail.failedLayer",
+              "StringEquals": "BRONZE"
+            }
+          ],
+          "Next": "BronzeLoadFailed"
+        },
+        {
+          "And": [
+            {
+              "Variable": "$.FailureDetail.failedLayer",
+              "IsPresent": true
+            },
+            {
+              "Variable": "$.FailureDetail.failedLayer",
+              "StringEquals": "SILVER"
+            }
+          ],
+          "Next": "SilverLoadFailed"
+        },
+        {
+          "And": [
+            {
+              "Variable": "$.FailureDetail.failedLayer",
+              "IsPresent": true
+            },
+            {
+              "Variable": "$.FailureDetail.failedLayer",
+              "StringEquals": "GOLD"
+            }
+          ],
+          "Next": "GoldLoadFailed"
+        }
+      ],
+      "Default": "WorkflowFailed"
+    },
+    "InvalidExecutionInput": {
+      "Type": "Fail",
+      "Comment": "Ends the run because the request was rejected. Neither Glue nor Snowflake was started.",
+      "Error": "InvalidExecutionInput",
+      "Cause": "The execution input was rejected: SOURCE_NAME, glueJobName, validationJobName and rootTask (DATABASE.SCHEMA.TASK) are required. Neither Glue nor Snowflake was started."
+    },
+    "GlueJobFailed": {
+      "Type": "Fail",
+      "Comment": "Ends the run because the Glue job failed, ran longer than two hours, or could not be started. The Snowflake root task was not started.",
+      "Error": "GlueJobFailed",
+      "Cause": "Glue job failed. Snowflake root task was not triggered."
+    },
+    "ValidationJobFailed": {
+      "Type": "Fail",
+      "Comment": "Ends the run because validation failed, timed out, or the successful extract rows could not be found. The Snowflake root task was not started.",
+      "Error": "ValidationJobFailed",
+      "Cause": "Validation did not pass after Glue extraction. The Snowflake root task was not triggered."
+    },
+    "SnowflakeOrchestrationFailed": {
+      "Type": "Fail",
+      "Comment": "Ends the run because the Snowflake root task could not be started or its status could not be read.",
+      "Error": "SnowflakeOrchestrationFailed",
+      "Cause": "The Snowflake root-task trigger or task-chain status query failed. Check the Step Functions execution history for the state that raised the error."
+    },
+    "PollingTimedOut": {
+      "Type": "Fail",
+      "Comment": "Ends the run because the task chain did not report success or failure within 30 minutes of being started. The Snowflake tasks may still be running.",
+      "Error": "DagPollingTimedOut",
+      "Cause": "The Snowflake task chain did not reach a success or failure status within the configured time limit."
+    },
+    "BronzeLoadFailed": {
+      "Type": "Fail",
+      "Comment": "Ends the run because a bronze-layer task, or data items processed by a bronze-layer job, failed first. The failure email names every failed layer and task of this run.",
+      "Error": "BronzeLoadFailed",
+      "Cause": "Bronze layer load failed. The failure email lists every failed layer and task of this run; check EDH_TASK_DAG_LOG, JOB_LOG and OBJECT_LOG for details."
+    },
+    "SilverLoadFailed": {
+      "Type": "Fail",
+      "Comment": "Ends the run because a silver-layer task, or data items processed by a silver-layer job, failed first. The failure email names every failed layer and task of this run.",
+      "Error": "SilverLoadFailed",
+      "Cause": "Silver layer load failed. The failure email lists every failed layer and task of this run; check EDH_TASK_DAG_LOG, JOB_LOG and OBJECT_LOG for details."
+    },
+    "GoldLoadFailed": {
+      "Type": "Fail",
+      "Comment": "Ends the run because a gold-layer task, or data items processed by a gold-layer job, failed first. The failure email names every failed layer and task of this run.",
+      "Error": "GoldLoadFailed",
+      "Cause": "Gold layer load failed. The failure email lists every failed layer and task of this run; check EDH_TASK_DAG_LOG, JOB_LOG and OBJECT_LOG for details."
+    },
+    "WorkflowFailed": {
+      "Type": "Fail",
+      "Comment": "Ends the run because the Snowflake load failed or is incomplete and no bronze, silver or gold layer could be named: a failed root task, a task whose name shows no layer, or a success that could not be verified.",
+      "Error": "SnowflakeLoadFailed",
+      "Cause": "Snowflake load failed (root task failure, unrecognised layer, or unverifiable success). Check the failure email and EDH_TASK_DAG_LOG, JOB_LOG and OBJECT_LOG for details."
+    }
+  }
+}
