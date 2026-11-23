@@ -7,7 +7,11 @@ Ready-to-run games for monthly org fun sessions (Bingo-style mixers, trivia, sca
 | File | Purpose |
 |------|---------|
 | `Monthly_Team_Event_Games_Playbook.pptx` | Facilitator PowerPoint (rules, cards, questions, answer keys) |
+| `Team_Event_Games_Playbook.html` | Same content in browser form (Print → Save as PDF) |
 | `create_playbook_ppt.py` | Script to regenerate the deck |
+
+**Direct PPTX download (from this branch):**  
+https://github.com/apoorvgl152/course/raw/cursor/team-event-games-ppt-eb4d/team-events/Monthly_Team_Event_Games_Playbook.pptx
 
 ## Games included
 
