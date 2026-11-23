@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Monthly Team Event — Fun Games Playbook</title>
+<style>
+  :root {
+    --bg: #f7f9f8; --ink: #1a2b2e; --muted: #4a5c60;
+    --teal: #0d7377; --teal-dark: #095456; --coral: #e85a4f;
+    --sand: #e8f0ef; --line: #c5d5d3; --white: #fff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: Georgia, "Times New Roman", serif;
+    background: var(--bg); color: var(--ink); line-height: 1.45;
+  }
+  header.hero {
+    background: var(--teal-dark); color: #fff; padding: 3.5rem 1.5rem 2.5rem;
+    border-bottom: 12px solid var(--teal);
+  }
+  header.hero .eyebrow { font-family: Calibri, Arial, sans-serif; letter-spacing: .08em;
+    font-size: .85rem; color: #a8d5d7; font-weight: 700; margin: 0 0 .5rem; }
+  header.hero h1 { font-size: clamp(2rem, 5vw, 3.2rem); margin: 0 0 .75rem; }
+  header.hero p { font-family: Calibri, Arial, sans-serif; font-size: 1.1rem; color: #d0e8e9; max-width: 40rem; }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 1.5rem; }
+  .toolbar {
+    position: sticky; top: 0; z-index: 5; background: rgba(247,249,248,.95);
+    backdrop-filter: blur(6px); border-bottom: 1px solid var(--line);
+    padding: .75rem 1.5rem; display: flex; gap: .75rem; flex-wrap: wrap; align-items: center;
+    font-family: Calibri, Arial, sans-serif; font-size: .9rem;
+  }
+  .toolbar a, .toolbar button {
+    background: var(--teal); color: #fff; border: 0; border-radius: 6px;
+    padding: .55rem 1rem; text-decoration: none; cursor: pointer; font: inherit;
+  }
+  .toolbar a.secondary { background: var(--ink); }
+  .toolbar span { color: var(--muted); }
+  section {
+    background: var(--white); border: 1px solid var(--line); border-radius: 12px;
+    padding: 1.5rem 1.6rem; margin: 1.25rem 0;
+  }
+  section h2 { font-size: 1.65rem; margin: 0 0 .35rem; }
+  .label { font-family: Calibri, Arial, sans-serif; font-size: .75rem; font-weight: 700;
+    letter-spacing: .06em; color: var(--teal); text-transform: uppercase; margin: 0 0 .25rem; }
+  .muted { font-family: Calibri, Arial, sans-serif; color: var(--muted); margin: 0 0 1rem; }
+  .grid { display: grid; gap: .9rem; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
+  .card { background: var(--sand); border-radius: 10px; padding: 1rem 1.1rem; }
+  .card.white { background: #fff; border: 1px solid var(--line); }
+  .card strong { display: block; color: var(--coral); font-family: Calibri, Arial, sans-serif; margin-bottom: .35rem; }
+  .card h3 { margin: 0 0 .4rem; font-size: 1.05rem; }
+  ol, ul { font-family: Calibri, Arial, sans-serif; padding-left: 1.2rem; margin: .4rem 0 0; }
+  li { margin: .35rem 0; }
+  .two { display: grid; gap: 1rem; grid-template-columns: 1fr; }
+  @media (min-width: 760px) { .two { grid-template-columns: 1fr 1fr; } }
+  table.bingo { width: 100%; border-collapse: collapse; table-layout: fixed; font-family: Calibri, Arial, sans-serif; font-size: .85rem; }
+  table.bingo td { border: 2px solid var(--teal); padding: .7rem .4rem; text-align: center; vertical-align: middle; height: 4.2rem; background: #fff; }
+  table.bingo td.free { background: var(--coral); color: #fff; font-weight: 700; border-color: var(--coral); }
+  .answers { background: var(--sand); }
+  .answers h2 { color: var(--teal-dark); }
+  footer.closer { background: var(--teal-dark); color: #fff; border-radius: 12px; padding: 2.5rem 1.6rem; margin: 1.5rem 0 3rem; }
+  footer.closer h2 { margin: 0 0 .6rem; font-size: 2rem; }
+  footer.closer p { font-family: Calibri, Arial, sans-serif; color: #d0e8e9; margin: 0; }
+  @media print {
+    .toolbar { display: none; }
+    section, footer.closer { break-inside: avoid; }
+  }
+</style>
+</head>
+<body>
+<div class="toolbar">
+  <span><strong>Fun Games Playbook</strong> — open in browser or Print → Save as PDF</span>
+  <button onclick="window.print()">Print / Save PDF</button>
+  <a class="secondary" href="https://github.com/apoorvgl152/course/raw/cursor/team-event-games-ppt-eb4d/team-events/Monthly_Team_Event_Games_Playbook.pptx">Download PPTX from GitHub</a>
+  <a href="https://github.com/apoorvgl152/course/pull/3">View PR #3</a>
+</div>
+
+<header class="hero">
+  <div class="wrap">
+    <p class="eyebrow">MONTHLY TEAM EVENT</p>
+    <h1>Fun Games Playbook</h1>
+    <p>Bingo, trivia, scavenger hunts &amp; more — ready-to-run activities with facilitator scripts, rules, and answer keys. Works remote, hybrid, or in-person.</p>
+  </div>
+</header>
+
+<main class="wrap">
+
+<section>
+  <p class="label">Overview</p>
+  <h2>Eight games inside</h2>
+  <p class="muted">Pick 2–3 per session. Sample 60-min flow is at the bottom.</p>
+  <div class="grid">
+    <div class="card white"><strong>01</strong><h3>Human Bingo</h3><p class="muted">Mix &amp; mingle icebreaker</p></div>
+    <div class="card white"><strong>02</strong><h3>Two Truths &amp; a Lie</h3><p class="muted">Storytelling + guessing</p></div>
+    <div class="card white"><strong>03</strong><h3>Team Trivia Sprint</h3><p class="muted">Quiz rounds + answers</p></div>
+    <div class="card white"><strong>04</strong><h3>Photo Scavenger Hunt</h3><p class="muted">Creative team challenge</p></div>
+    <div class="card white"><strong>05</strong><h3>Emoji Charades</h3><p class="muted">Act it out / guess it</p></div>
+    <div class="card white"><strong>06</strong><h3>Minute Challenges</h3><p class="muted">Fast desk mini-games</p></div>
+    <div class="card white"><strong>07</strong><h3>Would You Rather</h3><p class="muted">Debate &amp; bond</p></div>
+    <div class="card white"><strong>08</strong><h3>Office Olympics</h3><p class="muted">Relay-style mini sports</p></div>
+  </div>
+</section>
+
+<section>
+  <p class="label">Facilitator tips</p>
+  <h2>How to run a great session</h2>
+  <div class="grid">
+    <div class="card"><h3>Pick 2–3 games</h3><p>One icebreaker + one main game + one closer is plenty for 45–60 min.</p></div>
+    <div class="card"><h3>Explain → Demo → Play</h3><p>State the goal, show one example, then start. Keep rules under 60 seconds.</p></div>
+    <div class="card"><h3>Mix energy</h3><p>Pair Bingo/Charades with a calmer game like Would You Rather.</p></div>
+    <div class="card"><h3>Celebrate</h3><p>Cheer winners; optional small prizes (snacks, stickers, bragging rights).</p></div>
+    <div class="card"><h3>Remote tweaks</h3><p>Breakouts, shared docs, reactions, and a shared timer slide.</p></div>
+    <div class="card"><h3>Inclusion</h3><p>Avoid personal/medical topics; allow opt-outs without pressure.</p></div>
+  </div>
+</section>
+
+<section>
+  <p class="label">Game 01 · 15–20 min</p>
+  <h2>Human Bingo</h2>
+  <p class="muted">Find teammates who match each square, get initials, race for Bingo.</p>
+  <div class="two">
+    <div>
+      <h3>How to play</h3>
+      <ol>
+        <li>Share the Bingo card below (print or digital).</li>
+        <li>Walk around / use chat to find someone who fits each square.</li>
+        <li>They write initials — one person fills only ONE square per card.</li>
+        <li>First complete line (row/column/diagonal) shouts BINGO!</li>
+        <li>Optional: full card = Blackout Bingo for a bigger prize.</li>
+      </ol>
+    </div>
+    <div class="card">
+      <h3>Facilitator notes</h3>
+      <ul>
+        <li>Best with 8+ people.</li>
+        <li>Verify winners by calling a few initials.</li>
+        <li>Remote: mark names in a shared sheet.</li>
+      </ul>
+    </div>
+  </div>
+  <h3 style="margin-top:1.2rem">Sample Bingo card</h3>
+  <table class="bingo">
+    <tr><td>Has a pet</td><td>Speaks 2+ languages</td><td>Loves spicy food</td><td>Morning person</td><td>Visited 3+ countries</td></tr>
+    <tr><td>Plays an instrument</td><td>Left-handed</td><td>Coffee addict</td><td>Signature dish cook</td><td>Born same month as you</td></tr>
+    <tr><td>Funny nickname</td><td>Works from another city</td><td class="free">FREE SPACE</td><td>Binge-watched last week</td><td>Prefers tea over coffee</td></tr>
+    <tr><td>Has a named plant</td><td>Knows a magic trick</td><td>Loves karaoke</td><td>Can whistle loudly</td><td>Night owl</td></tr>
+    <tr><td>Owns 50+ books</td><td>Has a twin or sibling</td><td>Solves Rubik's cube</td><td>Has broken a bone</td><td>Ran/walked 5K recently</td></tr>
+  </table>
+</section>
+
+<section>
+  <p class="label">Game 02 · 15–25 min</p>
+  <h2>Two Truths and a Lie</h2>
+  <p class="muted">Each person shares three statements; the group votes on the lie.</p>
+  <ol>
+    <li>Prepare 2 true facts + 1 lie (work-safe).</li>
+    <li>Read all three with a straight face.</li>
+    <li>Group votes (hands / Zoom poll).</li>
+    <li>Reveal: correct guessers +1; speaker +1 if most were fooled.</li>
+    <li>Rotate until time is up.</li>
+  </ol>
+  <div class="card" style="margin-top:1rem">
+    <h3>Example sets (inspiration only — use your own truths)</h3>
+    <p><strong>Set A:</strong> 1) Met a celebrity in an elevator  2) Can name every European capital  3) Have skydived</p>
+    <p><strong>Set B:</strong> 1) Speak three languages  2) Hate chocolate  3) Lived on a boat for a month</p>
+    <p><strong>Set C:</strong> 1) Never broken a bone  2) Was on TV as a kid  3) Collect vintage stamps</p>
+  </div>
+</section>
+
+<section>
+  <p class="label">Game 03 · 20–30 min</p>
+  <h2>Team Trivia Sprint</h2>
+  <p class="muted">Teams of 3–5. 30–45 sec per question. 3 rounds × 5 questions. No phones.</p>
+  <div class="grid">
+    <div class="card white">
+      <h3>Round 1 · General</h3>
+      <ol>
+        <li>Largest planet in our solar system?</li>
+        <li>How many continents on Earth?</li>
+        <li>Language with most native speakers?</li>
+        <li>Element with symbol Au?</li>
+        <li>Year the first iPhone launched?</li>
+      </ol>
+    </div>
+    <div class="card white">
+      <h3>Round 2 · Movies &amp; Music</h3>
+      <ol>
+        <li>Who directed Inception?</li>
+        <li>Which band sang Bohemian Rhapsody?</li>
+        <li>Coffee shop name in Friends?</li>
+        <li>Disney film with Olaf?</li>
+        <li>Instrument with 88 keys?</li>
+      </ol>
+    </div>
+    <div class="card white">
+      <h3>Round 3 · Science &amp; Weird</h3>
+      <ol>
+        <li>Bones in an adult human body?</li>
+        <li>Fastest land animal?</li>
+        <li>True/false: bananas are berries?</li>
+        <li>Gas plants absorb that humans exhale?</li>
+        <li>How long for sunlight to reach Earth?</li>
+      </ol>
+    </div>
+  </div>
+</section>
+
+<section class="answers">
+  <p class="label">Facilitator only</p>
+  <h2>Trivia answer key</h2>
+  <div class="grid">
+    <div class="card white"><h3>Round 1</h3><ol><li>Jupiter</li><li>7</li><li>Mandarin Chinese</li><li>Gold</li><li>2007</li></ol></div>
+    <div class="card white"><h3>Round 2</h3><ol><li>Christopher Nolan</li><li>Queen</li><li>Central Perk</li><li>Frozen</li><li>Piano</li></ol></div>
+    <div class="card white"><h3>Round 3</h3><ol><li>206</li><li>Cheetah</li><li>True</li><li>CO₂</li><li>~8 minutes</li></ol></div>
+  </div>
+</section>
+
+<section>
+  <p class="label">Game 04 · 15–25 min</p>
+  <h2>Photo Scavenger Hunt</h2>
+  <p class="muted">12–15 minutes. Score: 1 pt/item, +2 creative, +3 funniest.</p>
+  <div class="grid">
+    <div class="card white">1. Something older than 20 years</div>
+    <div class="card white">2. All teammates wearing same color</div>
+    <div class="card white">3. Book with a weird title</div>
+    <div class="card white">4. Plant + human posing like it</div>
+    <div class="card white">5. Most chaotic desk setup</div>
+    <div class="card white">6. Pet or stuffed animal cameo</div>
+    <div class="card white">7. Recreate a famous movie poster</div>
+    <div class="card white">8. Optical illusion with household items</div>
+    <div class="card white">9. Homemade team trophy</div>
+    <div class="card white">10. Silliest synchronized pose</div>
+    <div class="card white">11. Window views from two homes</div>
+    <div class="card white">12. Spell team name with objects</div>
+  </div>
+</section>
+
+<section>
+  <p class="label">Game 05 · 15–20 min</p>
+  <h2>Emoji Charades</h2>
+  <p class="muted">Act silently OR emoji-only in chat. 60–90 sec. Correct guess = 1 point.</p>
+  <p><strong>Prompt bank (title = answer):</strong> The Lion King · Titanic · Finding Nemo · Spider-Man · Happy Birthday · Standup that could have been an email · Mute yourself on Zoom · Coffee break · Ship it Friday · Out of office</p>
+</section>
+
+<section>
+  <p class="label">Game 06 · 15–20 min</p>
+  <h2>Minute Challenges</h2>
+  <div class="grid">
+    <div class="card"><h3>Stack Attack</h3><p>Stack sticky notes/cups in 60s without falling.</p></div>
+    <div class="card"><h3>Emoji Story</h3><p>One-sentence story in emoji only; team decodes.</p></div>
+    <div class="card"><h3>Paper Plane</h3><p>Build &amp; throw for distance.</p></div>
+    <div class="card"><h3>Name Chain</h3><p>Say everyone’s name + a fruit in order.</p></div>
+    <div class="card"><h3>Desk Stretch</h3><p>60-sec stretch; vote funniest form.</p></div>
+    <div class="card"><h3>Blind Sketch</h3><p>Draw eyes-closed; team guesses.</p></div>
+  </div>
+</section>
+
+<section>
+  <p class="label">Game 07 · 10–15 min</p>
+  <h2>Would You Rather</h2>
+  <p class="muted">Pick a side; defend in 20 seconds.</p>
+  <ol>
+    <li>Always 10 min early OR exactly on time?</li>
+    <li>Beach for a month OR mountain cabin?</li>
+    <li>Only memes OR only voice notes?</li>
+    <li>Unlimited coffee OR unlimited snacks?</li>
+    <li>Horse-sized duck OR 100 duck-sized horses?</li>
+    <li>Always detect lies OR always get away with lying?</li>
+    <li>Meet future self OR past self (10 min)?</li>
+    <li>Funniest in the room OR smartest?</li>
+  </ol>
+</section>
+
+<section>
+  <p class="label">Game 08 · 20–30 min</p>
+  <h2>Office Olympics</h2>
+  <div class="grid">
+    <div class="card"><h3>Cotton Ball Race</h3><p>Spoon cotton balls bowl A → B.</p></div>
+    <div class="card"><h3>Sticky Note Ski</h3><p>Slide on sticky-note skis (safety first).</p></div>
+    <div class="card"><h3>Rubber Band Archery</h3><p>Hit a paper target.</p></div>
+    <div class="card"><h3>Chair Spin Memory</h3><p>Spin 3× then recall a 5-item list.</p></div>
+    <div class="card"><h3>Paperclip Chain</h3><p>Longest chain in 2 minutes.</p></div>
+    <div class="card"><h3>Silent Opera</h3><p>Sing a work slogan as opera; score drama.</p></div>
+  </div>
+</section>
+
+<section>
+  <p class="label">Ready-made agenda</p>
+  <h2>Sample 60-minute event</h2>
+  <ol>
+    <li><strong>0–5 min</strong> — Welcome + kindness rules + prize tease</li>
+    <li><strong>5–20 min</strong> — Human Bingo</li>
+    <li><strong>20–40 min</strong> — Team Trivia Sprint</li>
+    <li><strong>40–55 min</strong> — Emoji Charades or Photo Hunt</li>
+    <li><strong>55–60 min</strong> — Awards + next-month tease</li>
+  </ol>
+</section>
+
+<footer class="closer">
+  <h2>Have fun out there.</h2>
+  <p>Swap in company trivia, print Bingo cards, keep prizes light. Connection over perfection. Rotate games each month.</p>
+</footer>
+
+</main>
+</body>
+</html>
