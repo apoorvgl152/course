@@ -8,10 +8,15 @@ Ready-to-run games for monthly org fun sessions (Bingo-style mixers, trivia, sca
 |------|---------|
 | `Monthly_Team_Event_Games_Playbook.pptx` | Facilitator PowerPoint (rules, cards, questions, answer keys) |
 | `Team_Event_Games_Playbook.html` | Same content in browser form (Print → Save as PDF) |
-| `create_playbook_ppt.py` | Script to regenerate the deck |
+| `Two_Truths_and_a_Lie.pptx` | Dedicated player deck for Two Truths and a Lie |
+| `Two_Truths_and_a_Lie_SOLUTIONS.pptx` | Facilitator-only answer key (keep separate / do not project) |
+| `create_playbook_ppt.py` | Script to regenerate the full playbook |
+| `create_two_truths_ppt.py` | Script to regenerate the Two Truths decks |
 
-**Direct PPTX download (from this branch):**  
-https://github.com/apoorvgl152/course/raw/cursor/team-event-games-ppt-eb4d/team-events/Monthly_Team_Event_Games_Playbook.pptx
+**Direct downloads (from this branch):**  
+- Full playbook: https://github.com/apoorvgl152/course/raw/cursor/team-event-games-ppt-eb4d/team-events/Monthly_Team_Event_Games_Playbook.pptx  
+- Two Truths (players): https://github.com/apoorvgl152/course/raw/cursor/team-event-games-ppt-eb4d/team-events/Two_Truths_and_a_Lie.pptx  
+- Two Truths solutions: https://github.com/apoorvgl152/course/raw/cursor/team-event-games-ppt-eb4d/team-events/Two_Truths_and_a_Lie_SOLUTIONS.pptx
 
 ## Games included
 
