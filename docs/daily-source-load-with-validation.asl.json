@@ -280,7 +280,7 @@
     },
     "RunValidationJobs": {
       "Type": "Map",
-      "Comment": "Starts the validation Glue job once for each successful extract. The job name comes from validationJobName. JOB_ID_PARAM and JOB_LOG_ID_PARAM come from the lookup. SNOWFLAKE_CONNECTION is not passed here; it is a default argument on that Glue job. Up to three validations run at once. One failure stops the map. The Snowflake root task is not started.",
+      "Comment": "Starts the validation Glue job once for each successful extract. The job name comes from validationJobName. JOB_ID_PARAM and JOB_LOG_ID_PARAM come from the lookup. SNOWFLAKE_CONNECTION is a default argument on that Glue job, so it is not passed here. Up to three validations run at once. When every job succeeds, the Snowflake root task starts. One failure stops the map and the root task is not started.",
       "ItemsPath": "$.IngestionRuns.ResponseBody.data",
       "MaxConcurrency": 3,
       "ResultPath": null,
